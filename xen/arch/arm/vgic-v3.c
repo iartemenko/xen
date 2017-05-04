@@ -19,7 +19,6 @@
  */
 
 #include <xen/bitops.h>
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/softirq.h>
@@ -29,6 +28,7 @@
 #include <asm/current.h>
 #include <asm/mmio.h>
 #include <asm/gic_v3_defs.h>
+#include <asm/gic_v3_its.h>
 #include <asm/vgic.h>
 #include <asm/vgic-emul.h>
 #include <asm/vreg.h>
@@ -108,7 +108,7 @@ static uint64_t vgic_fetch_irouter(struct vgic_irq_rank *rank,
     /* Get the index in the rank */
     offset &= INTERRUPT_RANK_MASK;
 
-    return vcpuid_to_vaffinity(rank->vcpu[offset]);
+    return vcpuid_to_vaffinity(read_atomic(&rank->vcpu[offset]));
 }
 
 /*
@@ -136,7 +136,7 @@ static void vgic_store_irouter(struct domain *d, struct vgic_irq_rank *rank,
     offset &= virq & INTERRUPT_RANK_MASK;
 
     new_vcpu = vgic_v3_irouter_to_vcpu(d, irouter);
-    old_vcpu = d->vcpu[rank->vcpu[offset]];
+    old_vcpu = d->vcpu[read_atomic(&rank->vcpu[offset])];
 
     /*
      * From the spec (see 8.9.13 in IHI 0069A), any write with an
@@ -152,9 +152,10 @@ static void vgic_store_irouter(struct domain *d, struct vgic_irq_rank *rank,
 
     /* Only migrate the IRQ if the target vCPU has changed */
     if ( new_vcpu != old_vcpu )
-        vgic_migrate_irq(old_vcpu, new_vcpu, virq);
-
-    rank->vcpu[offset] = new_vcpu->vcpu_id;
+    {
+        if ( vgic_migrate_irq(old_vcpu, new_vcpu, virq) )
+            write_atomic(&rank->vcpu[offset], new_vcpu->vcpu_id);
+    }
 }
 
 static inline bool vgic_reg64_check_access(struct hsr_dabt dabt)
@@ -1438,7 +1439,7 @@ static inline unsigned int vgic_v3_rdist_count(struct domain *d)
 static int vgic_v3_domain_init(struct domain *d)
 {
     struct vgic_rdist_region *rdist_regions;
-    int rdist_count, i;
+    int rdist_count, i, ret;
 
     /* Allocate memory for Re-distributor regions */
     rdist_count = vgic_v3_rdist_count(d);
@@ -1498,6 +1499,10 @@ static int vgic_v3_domain_init(struct domain *d)
         d->arch.vgic.rdist_regions[0].first_cpu = 0;
     }
 
+    ret = vgic_v3_its_init_domain(d);
+    if ( ret )
+        return ret;
+
     /* Register mmio handle for the Distributor */
     register_mmio_handler(d, &vgic_distr_mmio_handler, d->arch.vgic.dbase,
                           SZ_64K, NULL);
@@ -1522,6 +1527,7 @@ static int vgic_v3_domain_init(struct domain *d)
 
 static void vgic_v3_domain_free(struct domain *d)
 {
+    vgic_v3_its_free_domain(d);
     xfree(d->arch.vgic.rdist_regions);
 }
 

@@ -731,6 +731,8 @@ LIBEXEC_LIB
 LIBEXEC_BIN
 LIBEXEC
 CONFIG_LEAF_DIR
+XENSTORED_PORT
+XENSTORED_KVA
 FILE_OFFSET_BITS
 OBJEXT
 EXEEXT
@@ -794,6 +796,7 @@ with_initddir
 with_sysconfig_leaf_dir
 with_libexec_leaf_dir
 with_xen_dumpdir
+with_rundir
 enable_rpath
 enable_githttp
 enable_monitors
@@ -1498,6 +1501,8 @@ Optional Packages:
                           Name of subdirectory in libexecdir to use.
   --with-xen-dumpdir=DIR  Path to directory for domU crash dumps.
                           [LOCALSTATEDIR/lib/xen/dump]
+  --with-rundir=DIR       Path to directory for runtime data.
+                          [LOCALSTATEDIR/run]
   --with-linux-backend-modules="mod1 mod2"
                           List of Linux backend module or modalias names to be
                           autoloaded on startup.
@@ -2408,7 +2413,7 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 
 
-ac_config_files="$ac_config_files ../config/Tools.mk hotplug/FreeBSD/rc.d/xencommons hotplug/FreeBSD/rc.d/xendriverdomain hotplug/Linux/init.d/sysconfig.xencommons hotplug/Linux/init.d/sysconfig.xendomains hotplug/Linux/init.d/xen-watchdog hotplug/Linux/init.d/xencommons hotplug/Linux/init.d/xendomains hotplug/Linux/init.d/xendriverdomain hotplug/Linux/launch-xenstore hotplug/Linux/vif-setup hotplug/Linux/xen-hotplug-common.sh hotplug/Linux/xendomains hotplug/NetBSD/rc.d/xencommons hotplug/NetBSD/rc.d/xendriverdomain libxl/xenlight.pc.in libxl/xlutil.pc.in ocaml/xenstored/oxenstored.conf"
+ac_config_files="$ac_config_files ../config/Tools.mk hotplug/FreeBSD/rc.d/xencommons hotplug/FreeBSD/rc.d/xendriverdomain hotplug/Linux/init.d/sysconfig.xencommons hotplug/Linux/init.d/sysconfig.xendomains hotplug/Linux/init.d/xen-watchdog hotplug/Linux/init.d/xencommons hotplug/Linux/init.d/xendomains hotplug/Linux/init.d/xendriverdomain hotplug/Linux/launch-xenstore hotplug/Linux/vif-setup hotplug/Linux/xen-hotplug-common.sh hotplug/Linux/xendomains hotplug/NetBSD/rc.d/xencommons hotplug/NetBSD/rc.d/xendriverdomain ocaml/xenstored/oxenstored.conf"
 
 ac_config_headers="$ac_config_headers config.h"
 
@@ -3794,6 +3799,18 @@ esac
 
 
 
+case "$host_os" in
+*freebsd*) XENSTORED_KVA=/dev/xen/xenstored ;;
+*) XENSTORED_KVA=/proc/xen/xsd_kva ;;
+esac
+
+
+case "$host_os" in
+*freebsd*) XENSTORED_PORT=/dev/xen/xenstored ;;
+*) XENSTORED_PORT=/proc/xen/xsd_port ;;
+esac
+
+
 # systemd.m4 - Macros to check for and enable systemd          -*- Autoconf -*-
 #
 # Copyright (C) 2014 Luis R. Rodriguez <mcgrof@suse.com>
@@ -3910,6 +3927,15 @@ else
 fi
 
 
+
+# Check whether --with-rundir was given.
+if test "${with_rundir+set}" = set; then :
+  withval=$with_rundir; rundir_path=$withval
+else
+  rundir_path=$localstatedir/run
+fi
+
+
 if test "$libexecdir" = '${exec_prefix}/libexec' ; then
     case "$host_os" in
          *netbsd*) ;;
@@ -3930,7 +3956,7 @@ LIBEXEC_INC=${LIBEXEC}/include
 XENFIRMWAREDIR=${LIBEXEC}/boot
 
 
-XEN_RUN_DIR=$localstatedir/run/xen
+XEN_RUN_DIR=$rundir_path/xen
 
 
 XEN_LOG_DIR=$localstatedir/log/xen
@@ -3939,7 +3965,7 @@ XEN_LOG_DIR=$localstatedir/log/xen
 XEN_LIB_STORED=$localstatedir/lib/xenstored
 
 
-XEN_RUN_STORED=$localstatedir/run/xenstored
+XEN_RUN_STORED=$rundir_path/xenstored
 
 
 XEN_LIB_DIR=$localstatedir/lib/xen
@@ -6554,11 +6580,11 @@ done
 
 if test "x$ocamltools" = "xy"; then :
 
-    if test "x$OCAMLC" = "xno" || test "x$OCAMLFIND" = "xno"; then :
+    if test "x$OCAMLOPT" = "xno" || test "x$OCAMLFIND" = "xno"; then :
 
         if test "x$enable_ocamltools" = "xyes"; then :
 
-            as_fn_error $? "Ocaml tools enabled, but unable to find Ocaml" "$LINENO" 5
+            as_fn_error $? "Ocaml tools enabled, but missing ocamlopt or ocamlfind" "$LINENO" 5
 fi
         ocamltools="n"
 
@@ -6793,7 +6819,9 @@ fi
 fi
 
 fi
-# Extract the first word of "bash", so it can be a program name with args.
+case "$host_os" in
+  freebsd*) ;;
+  *) # Extract the first word of "bash", so it can be a program name with args.
 set dummy bash; ac_word=$2
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
 $as_echo_n "checking for $ac_word... " >&6; }
@@ -6837,7 +6865,8 @@ fi
 if test x"${BASH}" = x"no"
 then
     as_fn_error $? "Unable to find bash, please install bash" "$LINENO" 5
-fi
+fi;;
+esac
 if echo "$PYTHON" | grep -q "^/"; then :
 
     PYTHONPATH=$PYTHON
@@ -10400,8 +10429,6 @@ do
     "hotplug/Linux/xendomains") CONFIG_FILES="$CONFIG_FILES hotplug/Linux/xendomains" ;;
     "hotplug/NetBSD/rc.d/xencommons") CONFIG_FILES="$CONFIG_FILES hotplug/NetBSD/rc.d/xencommons" ;;
     "hotplug/NetBSD/rc.d/xendriverdomain") CONFIG_FILES="$CONFIG_FILES hotplug/NetBSD/rc.d/xendriverdomain" ;;
-    "libxl/xenlight.pc.in") CONFIG_FILES="$CONFIG_FILES libxl/xenlight.pc.in" ;;
-    "libxl/xlutil.pc.in") CONFIG_FILES="$CONFIG_FILES libxl/xlutil.pc.in" ;;
     "ocaml/xenstored/oxenstored.conf") CONFIG_FILES="$CONFIG_FILES ocaml/xenstored/oxenstored.conf" ;;
     "config.h") CONFIG_HEADERS="$CONFIG_HEADERS config.h" ;;
     "hotplug/Linux/systemd/proc-xen.mount") CONFIG_FILES="$CONFIG_FILES hotplug/Linux/systemd/proc-xen.mount" ;;

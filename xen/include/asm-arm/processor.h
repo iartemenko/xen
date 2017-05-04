@@ -252,6 +252,7 @@
 #define HSR_EC_HVC32                0x12
 #define HSR_EC_SMC32                0x13
 #ifdef CONFIG_ARM_64
+#define HSR_EC_SVC64                0x15
 #define HSR_EC_HVC64                0x16
 #define HSR_EC_SMC64                0x17
 #define HSR_EC_SYSREG               0x18
@@ -706,7 +707,33 @@ void vcpu_regs_user_to_hyp(struct vcpu *vcpu,
 int call_smc(register_t function_id, register_t arg0, register_t arg1,
              register_t arg2);
 
-void do_trap_guest_error(struct cpu_user_regs *regs);
+void do_trap_hyp_serror(struct cpu_user_regs *regs);
+
+void do_trap_guest_serror(struct cpu_user_regs *regs);
+
+register_t get_default_hcr_flags(void);
+
+/* Functions for pending virtual abort checking window. */
+void abort_guest_exit_start(void);
+void abort_guest_exit_end(void);
+
+#define VABORT_GEN_BY_GUEST(r)  \
+( \
+    ( (unsigned long)abort_guest_exit_start == (r)->pc ) || \
+    ( (unsigned long)abort_guest_exit_end == (r)->pc ) \
+)
+
+/*
+ * Synchronize SError unless the feature is selected.
+ * This is relying on the SErrors are currently unmasked.
+ */
+#define SYNCHRONIZE_SERROR(feat)                                  \
+    do {                                                          \
+        ASSERT(!cpus_have_cap(feat) || local_abort_is_enabled()); \
+        asm volatile(ALTERNATIVE("dsb sy; isb",                   \
+                                 "nop; nop", feat)                \
+                                 : : : "memory");                 \
+    } while (0)
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_ARM_PROCESSOR_H */

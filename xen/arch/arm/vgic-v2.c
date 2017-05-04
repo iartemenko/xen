@@ -18,7 +18,6 @@
  */
 
 #include <xen/bitops.h>
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/softirq.h>
@@ -79,7 +78,7 @@ static uint32_t vgic_fetch_itargetsr(struct vgic_irq_rank *rank,
     offset &= ~(NR_TARGETS_PER_ITARGETSR - 1);
 
     for ( i = 0; i < NR_TARGETS_PER_ITARGETSR; i++, offset++ )
-        reg |= (1 << rank->vcpu[offset]) << (i * NR_BITS_PER_TARGET);
+        reg |= (1 << read_atomic(&rank->vcpu[offset])) << (i * NR_BITS_PER_TARGET);
 
     return reg;
 }
@@ -152,17 +151,16 @@ static void vgic_store_itargetsr(struct domain *d, struct vgic_irq_rank *rank,
         /* The vCPU ID always starts from 0 */
         new_target--;
 
-        old_target = rank->vcpu[offset];
+        old_target = read_atomic(&rank->vcpu[offset]);
 
         /* Only migrate the vIRQ if the target vCPU has changed */
         if ( new_target != old_target )
         {
-            vgic_migrate_irq(d->vcpu[old_target],
+            if ( vgic_migrate_irq(d->vcpu[old_target],
                              d->vcpu[new_target],
-                             virq);
+                             virq) )
+                write_atomic(&rank->vcpu[offset], new_target);
         }
-
-        rank->vcpu[offset] = new_target;
     }
 }
 

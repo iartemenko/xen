@@ -93,13 +93,18 @@ static void parse_cpuid(const char *arg, int *cpuid)
 static void parse_cpuid_and_int(int argc, char *argv[],
                                 int *cpuid, int *val, const char *what)
 {
+    if ( argc == 0 )
+    {
+         fprintf(stderr, "Missing %s\n", what);
+         exit(EINVAL);
+    }
+
     if ( argc > 1 )
         parse_cpuid(argv[0], cpuid);
 
-    if ( argc == 0 || sscanf(argv[argc > 1], "%d", val) != 1 )
+    if ( sscanf(argv[argc > 1], "%d", val) != 1 )
     {
-        fprintf(stderr, argc ? "Invalid %s '%s'\n" : "Missing %s\n",
-                what, argv[argc > 1]);
+        fprintf(stderr, "Invalid %s '%s'\n", what, argv[argc > 1]);
         exit(EINVAL);
     }
 }

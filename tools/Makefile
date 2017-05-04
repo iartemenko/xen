@@ -1,4 +1,7 @@
 XEN_ROOT = $(CURDIR)/..
+
+export PKG_CONFIG_DIR = $(CURDIR)/pkg-config
+
 include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS-y :=
@@ -31,6 +34,8 @@ endif
 
 SUBDIRS-y += xenpmd
 SUBDIRS-y += libxl
+SUBDIRS-$(CONFIG_GOLANG) += golang
+SUBDIRS-y += xl
 SUBDIRS-y += helpers
 SUBDIRS-$(CONFIG_X86) += xenpaging
 SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
@@ -60,12 +65,14 @@ endif
 build all: subdirs-all
 
 .PHONY: install
-install: subdirs-install
+install:
 	$(INSTALL_DIR) -m 700 $(DESTDIR)$(XEN_DUMP_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LOG_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LIB_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_STORED)
+	$(INSTALL_DIR) $(DESTDIR)$(PKG_INSTALLDIR)
+	$(MAKE) subdirs-install
 
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)
@@ -81,6 +88,7 @@ uninstall:
 	rm -rf $(D)$(XEN_LIB_DIR)
 	rm -rf $(D)$(XEN_LIB_STORED)
 	rm -rf $(D)$(XEN_RUN_STORED)
+	rm -rf $(D)$(PKG_INSTALLDIR)
 	rm -rf $(D)$(bindir)/cpuperf-perfcntr $(D)$(bindir)/cpuperf-xen
 	rm -rf $(D)$(bindir)/xc_shadow
 	rm -rf $(D)$(bindir)/pygrub
@@ -110,11 +118,12 @@ uninstall:
 
 .PHONY: clean
 clean: subdirs-clean
+	rm -rf pkg-config
 
 .PHONY: distclean
-distclean: subdirs-distclean
+distclean: subdirs-distclean clean
 	rm -rf qemu-xen-traditional-dir qemu-xen-traditional-dir-remote
-	rm -rf qemu-xen-dir qemu-xen-dir-remote
+	rm -rf qemu-xen-dir qemu-xen-dir-remote qemu-xen-build
 	rm -rf ../config/Tools.mk config.h config.log config.status \
 		config.cache autom4te.cache
 
@@ -242,9 +251,10 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	if test -d $(QEMU_UPSTREAM_LOC) ; then \
 		source=$(QEMU_UPSTREAM_LOC); \
 	else \
-		source=.; \
+		source=$(XEN_ROOT)/tools/qemu-xen-dir; \
 	fi; \
-	cd qemu-xen-dir; \
+	mkdir -p qemu-xen-build; \
+	cd qemu-xen-build; \
 	if $$source/scripts/tracetool.py --check-backend --backend log ; then \
 		enable_trace_backend='--enable-trace-backend=log'; \
 	elif $$source/scripts/tracetool.py --check-backend --backend stderr ; then \
@@ -252,6 +262,7 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	else \
 		enable_trace_backend='' ; \
 	fi ; \
+	PKG_CONFIG_PATH=$(XEN_ROOT)/tools/pkg-config \
 	$$source/configure --enable-xen --target-list=i386-softmmu \
 		$(QEMU_XEN_ENABLE_DEBUG) \
 		$$enable_trace_backend \
@@ -262,11 +273,13 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 		--extra-cflags="-DXC_WANT_COMPAT_EVTCHN_API=1 \
 		-DXC_WANT_COMPAT_GNTTAB_API=1 \
 		-DXC_WANT_COMPAT_MAP_FOREIGN_API=1 \
+		-DXC_WANT_COMPAT_DEVICEMODEL_API=1 \
 		-I$(XEN_ROOT)/tools/include \
 		-I$(XEN_ROOT)/tools/libs/toollog/include \
 		-I$(XEN_ROOT)/tools/libs/evtchn/include \
 		-I$(XEN_ROOT)/tools/libs/gnttab/include \
 		-I$(XEN_ROOT)/tools/libs/foreignmemory/include \
+		-I$(XEN_ROOT)/tools/libs/devicemodel/include \
 		-I$(XEN_ROOT)/tools/libxc/include \
 		-I$(XEN_ROOT)/tools/xenstore/include \
 		-I$(XEN_ROOT)/tools/xenstore/compat/include \
@@ -276,11 +289,13 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 		-L$(XEN_ROOT)/tools/libs/evtchn \
 		-L$(XEN_ROOT)/tools/libs/gnttab \
 		-L$(XEN_ROOT)/tools/libs/foreignmemory \
+		-L$(XEN_ROOT)/tools/libs/devicemodel \
 		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/toollog \
 		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/evtchn \
 		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/gnttab \
 		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/call \
 		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/foreignmemory \
+		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/devicemodel \
 		$(QEMU_UPSTREAM_RPATH)" \
 		--bindir=$(LIBEXEC_BIN) \
 		--datadir=$(SHAREDIR)/qemu-xen \
@@ -295,12 +310,12 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	$(MAKE) all
 
 subdir-install-qemu-xen-dir: subdir-all-qemu-xen-dir
-	cd qemu-xen-dir; \
+	cd qemu-xen-build; \
 	$(MAKE) install
 
 subdir-clean-qemu-xen-dir:
-	set -e; if test -d qemu-xen-dir/.; then \
-		$(MAKE) -C qemu-xen-dir clean; \
+	set -e; if test -d qemu-xen-build/.; then \
+		$(MAKE) -C qemu-xen-build clean; \
 	fi
 
 subdir-clean-debugger/gdbsx subdir-distclean-debugger/gdbsx: .phony

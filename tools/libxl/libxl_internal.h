@@ -38,7 +38,7 @@
 #include <ctype.h>
 
 #include <sys/mman.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -738,6 +738,13 @@ int libxl__xs_mknod(libxl__gc *gc, xs_transaction_t t,
 
 /* On success, *result_out came from the gc.
  * On error, *result_out is undefined.
+ * ENOENT is regarded as error.
+ */
+int libxl__xs_read_mandatory(libxl__gc *gc, xs_transaction_t t,
+                             const char *path, const char **result_out);
+
+/* On success, *result_out came from the gc.
+ * On error, *result_out is undefined.
  * ENOENT counts as success but sets *result_out=0
  */
 int libxl__xs_read_checked(libxl__gc *gc, xs_transaction_t t,
@@ -1116,13 +1123,13 @@ typedef struct {
     uint32_t console_port;
     uint32_t console_domid;
     unsigned long console_mfn;
+    char *console_tty;
 
     char *saved_state;
 
     libxl__file_reference pv_kernel;
     libxl__file_reference pv_ramdisk;
     const char * pv_cmdline;
-    bool pvh_enabled;
 
     xen_vmemrange_t *vmemranges;
     uint32_t num_vmemranges;
@@ -1199,7 +1206,6 @@ _hidden int libxl__device_exists(libxl__gc *gc, xs_transaction_t t,
 _hidden int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
         libxl__device *device, char **bents, char **fents, char **ro_fents);
 _hidden char *libxl__device_backend_path(libxl__gc *gc, libxl__device *device);
-_hidden char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device);
 _hidden char *libxl__device_libxl_path(libxl__gc *gc, libxl__device *device);
 _hidden int libxl__parse_backend_path(libxl__gc *gc, const char *path,
                                       libxl__device *dev);
@@ -1242,6 +1248,8 @@ _hidden int libxl__device_vkb_setdefault(libxl__gc *gc, libxl_device_vkb *vkb);
 _hidden int libxl__device_pci_setdefault(libxl__gc *gc, libxl_device_pci *pci);
 _hidden void libxl__rdm_setdefault(libxl__gc *gc,
                                    libxl_domain_build_info *b_info);
+_hidden int libxl__device_p9_setdefault(libxl__gc *gc,
+                                        libxl_device_p9 *p9);
 
 _hidden const char *libxl__device_nic_devname(libxl__gc *gc,
                                               uint32_t domid,
@@ -1824,9 +1832,9 @@ _hidden int libxl__qmp_nbd_server_add(libxl__gc *gc, int domid,
 _hidden int libxl__qmp_start_replication(libxl__gc *gc, int domid,
                                          bool primary);
 /* Get replication error that occurs when the vm is running */
-_hidden int libxl__qmp_get_replication_error(libxl__gc *gc, int domid);
+_hidden int libxl__qmp_query_xen_replication_status(libxl__gc *gc, int domid);
 /* Do checkpoint */
-_hidden int libxl__qmp_do_checkpoint(libxl__gc *gc, int domid);
+_hidden int libxl__qmp_colo_do_checkpoint(libxl__gc *gc, int domid);
 /* Stop replication */
 _hidden int libxl__qmp_stop_replication(libxl__gc *gc, int domid,
                                         bool primary);
@@ -2655,6 +2663,10 @@ _hidden int libxl__device_vkb_add(libxl__gc *gc, uint32_t domid,
 /* Internal function to connect a vfb device */
 _hidden int libxl__device_vfb_add(libxl__gc *gc, uint32_t domid,
                                   libxl_device_vfb *vfb);
+
+/* Internal function to connect a 9pfs device */
+_hidden int libxl__device_p9_add(libxl__gc *gc, uint32_t domid,
+                                 libxl_device_p9 *p9);
 
 /* Waits for the passed device to reach state XenbusStateInitWait.
  * This is not really useful by itself, but is important when executing
@@ -4238,6 +4250,13 @@ uint64_t libxl__get_targetmem_fudge(libxl__gc *gc,
 
     return info->video_memkb + mem_target_fudge;
 }
+
+int libxl__get_memory_target(libxl__gc *gc, uint32_t domid,
+                             uint64_t *out_target_memkb,
+                             uint64_t *out_max_memkb);
+void libxl__xcinfo2xlinfo(libxl_ctx *ctx,
+                          const xc_domaininfo_t *xcinfo,
+                          libxl_dominfo *xlinfo);
 
 /* Macros used to compare device identifier. Returns true if the two
  * devices have same identifier. */

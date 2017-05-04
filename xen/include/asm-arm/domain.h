@@ -1,7 +1,6 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
-#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/sched.h>
 #include <asm/page.h>
@@ -11,11 +10,12 @@
 #include <asm/gic.h>
 #include <public/hvm/params.h>
 #include <xen/serial.h>
+#include <xen/rbtree.h>
 
 struct hvm_domain
 {
     uint64_t              params[HVM_NR_PARAMS];
-}  __cacheline_aligned;
+};
 
 #ifdef CONFIG_ARM_64
 enum domain_type {
@@ -109,6 +109,8 @@ struct arch_domain
         } *rdist_regions;
         int nr_regions;                     /* Number of rdist regions */
         uint32_t rdist_stride;              /* Re-Distributor stride */
+        struct rb_root its_devices;         /* Devices mapped to an ITS */
+        spinlock_t its_devices_lock;        /* Protects the its_devices tree */
 #endif
     } vgic;
 
@@ -205,6 +207,9 @@ struct arch_vcpu
     register_t tpidr_el1;
     register_t tpidrro_el0;
 
+    /* HYP configuration */
+    register_t hcr_el2;
+
     uint32_t teecr, teehbr; /* ThumbEE, 32-bit guests only */
 #ifdef CONFIG_ARM_32
     /*
@@ -266,6 +271,7 @@ struct arch_vcpu
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
+void vcpu_switch_to_aarch64_mode(struct vcpu *);
 
 unsigned int domain_max_vcpus(const struct domain *);
 

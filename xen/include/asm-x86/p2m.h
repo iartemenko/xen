@@ -26,7 +26,6 @@
 #ifndef _XEN_ASM_X86_P2M_H
 #define _XEN_ASM_X86_P2M_H
 
-#include <xen/config.h>
 #include <xen/paging.h>
 #include <xen/p2m-common.h>
 #include <xen/mem_access.h>
@@ -90,7 +89,8 @@ typedef unsigned int p2m_query_t;
                        | p2m_to_mask(p2m_ram_paging_out)      \
                        | p2m_to_mask(p2m_ram_paged)           \
                        | p2m_to_mask(p2m_ram_paging_in)       \
-                       | p2m_to_mask(p2m_ram_shared))
+                       | p2m_to_mask(p2m_ram_shared)          \
+                       | p2m_to_mask(p2m_ioreq_server))
 
 /* Types that represent a physmap hole that is ok to replace with a shared
  * entry */
@@ -112,8 +112,7 @@ typedef unsigned int p2m_query_t;
 #define P2M_RO_TYPES (p2m_to_mask(p2m_ram_logdirty)     \
                       | p2m_to_mask(p2m_ram_ro)         \
                       | p2m_to_mask(p2m_grant_map_ro)   \
-                      | p2m_to_mask(p2m_ram_shared)     \
-                      | p2m_to_mask(p2m_ioreq_server))
+                      | p2m_to_mask(p2m_ram_shared))
 
 /* Write-discard types, which should discard the write operations */
 #define P2M_DISCARD_WRITE_TYPES (p2m_to_mask(p2m_ram_ro)     \
@@ -121,7 +120,8 @@ typedef unsigned int p2m_query_t;
 
 /* Types that can be subject to bulk transitions. */
 #define P2M_CHANGEABLE_TYPES (p2m_to_mask(p2m_ram_rw) \
-                              | p2m_to_mask(p2m_ram_logdirty) )
+                              | p2m_to_mask(p2m_ram_logdirty) \
+                              | p2m_to_mask(p2m_ioreq_server) )
 
 #define P2M_POD_TYPES (p2m_to_mask(p2m_populate_on_demand))
 
@@ -337,6 +337,21 @@ struct p2m_domain {
         struct ept_data ept;
         /* NPT-equivalent structure could be added here. */
     };
+
+     struct {
+         spinlock_t lock;
+         /*
+          * ioreq server who's responsible for the emulation of
+          * gfns with specific p2m type(for now, p2m_ioreq_server).
+          */
+         struct hvm_ioreq_server *server;
+         /*
+          * flags specifies whether read, write or both operations
+          * are to be emulated by an ioreq server.
+          */
+         unsigned int flags;
+         unsigned long entry_count;
+     } ioreq;
 };
 
 /* get host p2m table */
@@ -466,7 +481,7 @@ static inline struct page_info *get_page_from_gfn(
     if (t)
         *t = p2m_ram_rw;
     page = __mfn_to_page(gfn);
-    return mfn_valid(gfn) && get_page(page, d) ? page : NULL;
+    return mfn_valid(_mfn(gfn)) && get_page(page, d) ? page : NULL;
 }
 
 
@@ -591,6 +606,12 @@ void p2m_change_type_range(struct domain *d,
 int p2m_change_type_one(struct domain *d, unsigned long gfn,
                         p2m_type_t ot, p2m_type_t nt);
 
+/* Synchronously change the p2m type for a range of gfns */
+void p2m_finish_type_change(struct domain *d,
+                            gfn_t first_gfn,
+                            unsigned long max_nr,
+                            p2m_type_t ot, p2m_type_t nt);
+
 /* Report a change affecting memory types. */
 void p2m_memory_type_changed(struct domain *d);
 
@@ -680,7 +701,7 @@ int p2m_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
 extern void p2m_pt_init(struct p2m_domain *p2m);
 
 void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
-                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *rc);
+                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *pfec);
 
 /* Debugging and auditing of the P2M code? */
 #ifndef NDEBUG
@@ -729,6 +750,28 @@ static inline p2m_type_t p2m_flags_to_type(unsigned long flags)
     /* AMD IOMMUs use bits 9-11 to encode next io page level and bits
      * 59-62 for iommu flags so we can't use them to store p2m type info. */
     return (flags >> 12) & 0x7f;
+}
+
+static inline p2m_type_t p2m_recalc_type_range(bool recalc, p2m_type_t t,
+                                               struct p2m_domain *p2m,
+                                               unsigned long gfn_start,
+                                               unsigned long gfn_end)
+{
+    if ( !recalc || !p2m_is_changeable(t) )
+        return t;
+
+    if ( t == p2m_ioreq_server && p2m->ioreq.server != NULL )
+        return t;
+
+    return p2m_is_logdirty_range(p2m, gfn_start, gfn_end) ? p2m_ram_logdirty
+                                                          : p2m_ram_rw;
+}
+
+static inline p2m_type_t p2m_recalc_type(bool recalc, p2m_type_t t,
+                                         struct p2m_domain *p2m,
+                                         unsigned long gfn)
+{
+    return p2m_recalc_type_range(recalc, t, p2m, gfn, gfn);
 }
 
 int p2m_pt_handle_deferred_changes(uint64_t gpa);
@@ -799,7 +842,7 @@ void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
 /*
  * p2m type to IOMMU flags
  */
-static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt)
+static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt, mfn_t mfn)
 {
     unsigned int flags;
 
@@ -815,6 +858,11 @@ static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt)
     case p2m_grant_map_ro:
         flags = IOMMUF_readable;
         break;
+    case p2m_mmio_direct:
+        flags = IOMMUF_readable;
+        if ( !rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
+            flags |= IOMMUF_writable;
+        break;
     default:
         flags = 0;
         break;
@@ -822,6 +870,11 @@ static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt)
 
     return flags;
 }
+
+int p2m_set_ioreq_server(struct domain *d, unsigned int flags,
+                         struct hvm_ioreq_server *s);
+struct hvm_ioreq_server *p2m_get_ioreq_server(struct domain *d,
+                                              unsigned int *flags);
 
 #endif /* _XEN_ASM_X86_P2M_H */
 

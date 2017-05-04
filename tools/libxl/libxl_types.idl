@@ -191,6 +191,7 @@ libxl_scheduler = Enumeration("scheduler", [
     (6, "credit2"),
     (7, "arinc653"),
     (8, "rtds"),
+    (9, "null"),
     ])
 
 # Consistent with SHUTDOWN_* in sched.h (apart from UNKNOWN)
@@ -224,6 +225,7 @@ libxl_viridian_enlightenment = Enumeration("viridian_enlightenment", [
     (3, "reference_tsc"),
     (4, "hcall_remote_tlb_flush"),
     (5, "apic_assist"),
+    (6, "crash_ctl"),
     ])
 
 libxl_hdtype = Enumeration("hdtype", [
@@ -382,7 +384,6 @@ libxl_domain_create_info = Struct("domain_create_info",[
     ("poolid",       uint32),
     ("pool_name",    string),
     ("run_hotplug_scripts",libxl_defbool),
-    ("pvh",          libxl_defbool),
     ("driver_domain",libxl_defbool),
     ], dir=DIR_IN)
 
@@ -390,6 +391,7 @@ libxl_domain_restore_params = Struct("domain_restore_params", [
     ("checkpointed_stream", integer),
     ("stream_version", uint32, {'init_val': '1'}),
     ("colo_proxy_script", string),
+    ("userspace_colo_proxy", libxl_defbool),
     ])
 
 libxl_sched_params = Struct("sched_params",[
@@ -439,6 +441,14 @@ libxl_rdm_reserve = Struct("rdm_reserve", [
     ("strategy",    libxl_rdm_reserve_strategy),
     ("policy",      libxl_rdm_reserve_policy),
     ])
+
+# Consistent with the values defined for HVM_PARAM_ALTP2M
+libxl_altp2m_mode = Enumeration("altp2m_mode", [
+    (0, "disabled"),
+    (1, "mixed"),
+    (2, "external"),
+    (3, "limited"),
+    ], init_val = "LIBXL_ALTP2M_MODE_DISABLED")
 
 libxl_domain_build_info = Struct("domain_build_info",[
     ("max_vcpus",       integer),
@@ -507,6 +517,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("acpi",             libxl_defbool),
                                        ("acpi_s3",          libxl_defbool),
                                        ("acpi_s4",          libxl_defbool),
+                                       ("acpi_laptop_slate",libxl_defbool),
                                        ("nx",               libxl_defbool),
                                        ("viridian",         libxl_defbool),
                                        ("viridian_enable",  libxl_bitmap),
@@ -517,6 +528,9 @@ libxl_domain_build_info = Struct("domain_build_info",[
                                        ("mmio_hole_memkb",  MemKB),
                                        ("timer_mode",       libxl_timer_mode),
                                        ("nested_hvm",       libxl_defbool),
+                                       # The u.hvm.altp2m field is used solely
+                                       # for x86 HVM guests and is maintained
+                                       # for legacy purposes.
                                        ("altp2m",           libxl_defbool),
                                        ("system_firmware",  string),
                                        ("smbios_firmware",  string),
@@ -567,6 +581,9 @@ libxl_domain_build_info = Struct("domain_build_info",[
 
     ("arch_arm", Struct(None, [("gic_version", libxl_gic_version),
                               ])),
+    # Alternate p2m is not bound to any architecture or guest type, as it is
+    # supported by x86 HVM and ARM support is planned.
+    ("altp2m", libxl_altp2m_mode),
 
     ], dir=DIR_IN
 )
@@ -628,7 +645,55 @@ libxl_device_nic = Struct("device_nic", [
     ("gatewaydev", string),
     # Note that the COLO configuration settings should be considered unstable.
     # They may change incompatibly in future versions of Xen.
-    ("coloft_forwarddev", string)
+    ("coloft_forwarddev", string),
+    ("colo_sock_mirror_id", string),
+    ("colo_sock_mirror_ip", string),
+    ("colo_sock_mirror_port", string),
+    ("colo_sock_compare_pri_in_id", string),
+    ("colo_sock_compare_pri_in_ip", string),
+    ("colo_sock_compare_pri_in_port", string),
+    ("colo_sock_compare_sec_in_id", string),
+    ("colo_sock_compare_sec_in_ip", string),
+    ("colo_sock_compare_sec_in_port", string),
+    ("colo_sock_compare_notify_id", string),
+    ("colo_sock_compare_notify_ip", string),
+    ("colo_sock_compare_notify_port", string),
+    ("colo_sock_redirector0_id", string),
+    ("colo_sock_redirector0_ip", string),
+    ("colo_sock_redirector0_port", string),
+    ("colo_sock_redirector1_id", string),
+    ("colo_sock_redirector1_ip", string),
+    ("colo_sock_redirector1_port", string),
+    ("colo_sock_redirector2_id", string),
+    ("colo_sock_redirector2_ip", string),
+    ("colo_sock_redirector2_port", string),
+    ("colo_filter_mirror_queue", string),
+    ("colo_filter_mirror_outdev", string),
+    ("colo_filter_redirector0_queue", string),
+    ("colo_filter_redirector0_indev", string),
+    ("colo_filter_redirector0_outdev", string),
+    ("colo_filter_redirector1_queue", string),
+    ("colo_filter_redirector1_indev", string),
+    ("colo_filter_redirector1_outdev", string),
+    ("colo_compare_pri_in", string),
+    ("colo_compare_sec_in", string),
+    ("colo_compare_out", string),
+    ("colo_compare_notify_dev", string),
+    ("colo_sock_sec_redirector0_id", string),
+    ("colo_sock_sec_redirector0_ip", string),
+    ("colo_sock_sec_redirector0_port", string),
+    ("colo_sock_sec_redirector1_id", string),
+    ("colo_sock_sec_redirector1_ip", string),
+    ("colo_sock_sec_redirector1_port", string),
+    ("colo_filter_sec_redirector0_queue", string),
+    ("colo_filter_sec_redirector0_indev", string),
+    ("colo_filter_sec_redirector0_outdev", string),
+    ("colo_filter_sec_redirector1_queue", string),
+    ("colo_filter_sec_redirector1_indev", string),
+    ("colo_filter_sec_redirector1_outdev", string),
+    ("colo_filter_sec_rewriter0_queue", string),
+    ("colo_checkpoint_host", string),
+    ("colo_checkpoint_port", string)
     ])
 
 libxl_device_pci = Struct("device_pci", [
@@ -692,6 +757,15 @@ libxl_device_vtpm = Struct("device_vtpm", [
     ("uuid",             libxl_uuid),
 ])
 
+libxl_device_p9 = Struct("device_p9", [
+    ("backend_domid",    libxl_domid),
+    ("backend_domname",  string),
+    ("tag",              string),
+    ("path",             string),
+    ("security_model",   string),
+    ("devid",            libxl_devid),
+])
+
 libxl_device_channel = Struct("device_channel", [
     ("backend_domid", libxl_domid),
     ("backend_domname", string),
@@ -716,6 +790,7 @@ libxl_domain_config = Struct("domain_config", [
     ("vfbs", Array(libxl_device_vfb, "num_vfbs")),
     ("vkbs", Array(libxl_device_vkb, "num_vkbs")),
     ("vtpms", Array(libxl_device_vtpm, "num_vtpms")),
+    ("p9", Array(libxl_device_p9, "num_p9s")),
     # a channel manifests as a console with a name,
     # see docs/misc/channels.txt
     ("channels", Array(libxl_device_channel, "num_channels")),
@@ -844,14 +919,15 @@ libxl_sched_credit2_params = Struct("sched_credit2_params", [
     ], dispose_fn=None)
 
 libxl_domain_remus_info = Struct("domain_remus_info",[
-    ("interval",     integer),
-    ("allow_unsafe", libxl_defbool),
-    ("blackhole",    libxl_defbool),
-    ("compression",  libxl_defbool),
-    ("netbuf",       libxl_defbool),
-    ("netbufscript", string),
-    ("diskbuf",      libxl_defbool),
-    ("colo",         libxl_defbool)
+    ("interval",             integer),
+    ("allow_unsafe",         libxl_defbool),
+    ("blackhole",            libxl_defbool),
+    ("compression",          libxl_defbool),
+    ("netbuf",               libxl_defbool),
+    ("netbufscript",         string),
+    ("diskbuf",              libxl_defbool),
+    ("colo",                 libxl_defbool),
+    ("userspace_colo_proxy", libxl_defbool)
     ])
 
 libxl_event_type = Enumeration("event_type", [

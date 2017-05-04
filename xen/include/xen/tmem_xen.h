@@ -25,7 +25,7 @@
 typedef uint32_t pagesize_t;  /* like size_t, must handle largest PAGE_SIZE */
 
 #define IS_PAGE_ALIGNED(addr) IS_ALIGNED((unsigned long)(addr), PAGE_SIZE)
-#define IS_VALID_PAGE(_pi)  ( mfn_valid(page_to_mfn(_pi)) )
+#define IS_VALID_PAGE(_pi)    mfn_valid(_mfn(page_to_mfn(_pi)))
 
 extern struct page_list_head tmem_page_list;
 extern spinlock_t tmem_page_list_lock;
@@ -39,12 +39,6 @@ extern bool_t opt_tmem_compress;
 static inline bool_t tmem_compression_enabled(void)
 {
     return opt_tmem_compress;
-}
-
-extern bool_t opt_tmem_shared_auth;
-static inline bool_t tmem_shared_auth(void)
-{
-    return opt_tmem_shared_auth;
 }
 
 #ifdef CONFIG_TMEM
@@ -185,9 +179,8 @@ typedef XEN_GUEST_HANDLE_PARAM(char) tmem_cli_va_param_t;
 static inline int tmem_get_tmemop_from_client(tmem_op_t *op, tmem_cli_op_t uops)
 {
 #ifdef CONFIG_COMPAT
-    if ( has_hvm_container_vcpu(current) ?
-         hvm_guest_x86_mode(current) != 8 :
-         is_pv_32bit_vcpu(current) )
+    if ( is_hvm_vcpu(current) ? hvm_guest_x86_mode(current) != 8
+                              : is_pv_32bit_vcpu(current) )
     {
         int rc;
         enum XLAT_tmem_op_u u;
@@ -199,8 +192,6 @@ static inline int tmem_get_tmemop_from_client(tmem_op_t *op, tmem_cli_op_t uops)
         switch ( cop.cmd )
         {
         case TMEM_NEW_POOL:   u = XLAT_tmem_op_u_creat; break;
-        case TMEM_AUTH:       u = XLAT_tmem_op_u_creat; break;
-        case TMEM_RESTORE_NEW:u = XLAT_tmem_op_u_creat; break;
         default:              u = XLAT_tmem_op_u_gen ;  break;
         }
         XLAT_tmem_op(op, &cop);
@@ -294,7 +285,6 @@ struct client {
     long eph_count, eph_count_max;
     domid_t cli_id;
     xen_tmem_client_t info;
-    bool_t shared_auth_required;
     /* For save/restore/migration. */
     bool_t was_frozen;
     struct list_head persistent_invalidated_list;

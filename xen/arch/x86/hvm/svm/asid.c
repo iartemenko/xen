@@ -15,7 +15,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/perfc.h>
@@ -23,7 +22,7 @@
 #include <asm/amd.h>
 #include <asm/hvm/nestedhvm.h>
 
-void svm_asid_init(struct cpuinfo_x86 *c)
+void svm_asid_init(const struct cpuinfo_x86 *c)
 {
     int nasids = 0;
 

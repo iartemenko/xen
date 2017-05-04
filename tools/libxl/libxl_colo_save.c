@@ -86,6 +86,7 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
     libxl__checkpoint_devices_state *const cds = &dss->cds;
     libxl__srm_save_autogen_callbacks *const callbacks =
         &dss->sws.shs.callbacks.save.a;
+    libxl_device_nic *nics;
 
     STATE_AO_GC(dss->ao);
 
@@ -101,6 +102,8 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
     css->qdisk_setuped = false;
     css->qdisk_used = false;
     libxl__ev_child_init(&css->child);
+    css->cps.is_userspace_proxy =
+        libxl_defbool_val(dss->remus->userspace_colo_proxy);
 
     if (dss->remus->netbufscript)
         css->colo_proxy_script = libxl__strdup(gc, dss->remus->netbufscript);
@@ -108,13 +111,24 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
         css->colo_proxy_script = GCSPRINTF("%s/colo-proxy-setup",
                                            libxl__xen_script_dir_path());
 
-    cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
-                             (1 << LIBXL__DEVICE_KIND_VBD);
     cds->ops = colo_ops;
     cds->callback = colo_save_setup_done;
     cds->ao = ao;
     cds->domid = dss->domid;
     cds->concrete_data = css;
+
+    /* If enable userspace proxy mode, we don't need VIF */
+    if (css->cps.is_userspace_proxy) {
+        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VBD);
+
+        /* Use this args we can connect to qemu colo-compare */
+        nics = libxl_device_nic_list(CTX, cds->domid, &cds->num_nics);
+        css->cps.checkpoint_host = nics->colo_checkpoint_host;
+        css->cps.checkpoint_port = nics->colo_checkpoint_port;
+    } else {
+        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
+                                 (1 << LIBXL__DEVICE_KIND_VBD);
+    }
 
     css->srs.ao = ao;
     css->srs.fd = css->recv_fd;
@@ -331,7 +345,8 @@ static void colo_read_svm_suspended_done(libxl__egc *egc,
         goto out;
     }
 
-    if (!css->paused && libxl__qmp_get_replication_error(gc, dss->domid)) {
+    if (!css->paused &&
+        libxl__qmp_query_xen_replication_status(gc, dss->domid)) {
         LOGD(ERROR, dss->domid,
              "replication error occurs when primary vm is running");
         goto out;
@@ -446,7 +461,7 @@ static void colo_preresume_cb(libxl__egc *egc,
     }
 
     if (!css->paused) {
-        if (libxl__qmp_do_checkpoint(gc, dss->domid)) {
+        if (libxl__qmp_colo_do_checkpoint(gc, dss->domid)) {
             LOGD(ERROR, dss->domid, "doing checkpoint fails");
             goto out;
         }

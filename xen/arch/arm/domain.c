@@ -9,7 +9,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include <xen/config.h>
 #include <xen/hypercall.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -30,6 +29,7 @@
 #include <asm/cpufeature.h>
 #include <asm/vfp.h>
 #include <asm/procinfo.h>
+#include <asm/alternative.h>
 
 #include <asm/gic.h>
 #include <asm/vgic.h>
@@ -313,6 +313,17 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 
     local_irq_disable();
 
+    /*
+     * If the serrors_op is "FORWARD", we have to prevent forwarding
+     * SError to wrong vCPU. So before context switch, we have to use
+     * the SYNCRONIZE_SERROR to guarantee that the pending SError would
+     * be caught by current vCPU.
+     *
+     * The SKIP_CTXT_SWITCH_SERROR_SYNC will be set to cpu_hwcaps when the
+     * serrors_op is NOT "FORWARD".
+     */
+    SYNCHRONIZE_SERROR(SKIP_CTXT_SWITCH_SERROR_SYNC);
+
     set_current(next);
 
     prev = __context_switch(prev, next);
@@ -349,17 +360,7 @@ void sync_vcpu_execstate(struct vcpu *v)
 
 void hypercall_cancel_continuation(void)
 {
-    struct cpu_user_regs *regs = guest_cpu_user_regs();
-    struct mc_state *mcs = &current->mc_state;
-
-    if ( mcs->flags & MCSF_in_multicall )
-    {
-        __clear_bit(_MCSF_call_preempted, &mcs->flags);
-    }
-    else
-    {
-        regs->pc += 4; /* undo re-execute 'hvc #XEN_HYPERCALL_TAG' */
-    }
+    current->hcall_preempted = false;
 }
 
 unsigned long hypercall_create_continuation(
@@ -375,12 +376,12 @@ unsigned long hypercall_create_continuation(
     /* All hypercalls take at least one argument */
     BUG_ON( !p || *p == '\0' );
 
+    current->hcall_preempted = true;
+
     va_start(args, format);
 
     if ( mcs->flags & MCSF_in_multicall )
     {
-        __set_bit(_MCSF_call_preempted, &mcs->flags);
-
         for ( i = 0; *p != '\0'; i++ )
             mcs->call.args[i] = next_arg(p, args);
 
@@ -390,9 +391,6 @@ unsigned long hypercall_create_continuation(
     else
     {
         regs = guest_cpu_user_regs();
-
-        /* Ensure the hypercall trap instruction is re-executed. */
-        regs->pc -= 4;  /* re-execute 'hvc #XEN_HYPERCALL_TAG' */
 
 #ifdef CONFIG_ARM_64
         if ( !is_32bit_domain(current->domain) )
@@ -527,6 +525,8 @@ int vcpu_initialise(struct vcpu *v)
 
     v->arch.actlr = READ_SYSREG32(ACTLR_EL1);
 
+    v->arch.hcr_el2 = get_default_hcr_flags();
+
     processor_vcpu_initialise(v);
 
     if ( (rc = vcpu_vgic_init(v)) != 0 )
@@ -547,6 +547,11 @@ void vcpu_destroy(struct vcpu *v)
     vcpu_timer_destroy(v);
     vcpu_vgic_free(v);
     free_xenheap_pages(v->arch.stack, STACK_ORDER);
+}
+
+void vcpu_switch_to_aarch64_mode(struct vcpu *v)
+{
+    v->arch.hcr_el2 |= HCR_RW;
 }
 
 int arch_domain_create(struct domain *d, unsigned int domcr_flags,

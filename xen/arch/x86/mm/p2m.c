@@ -50,8 +50,6 @@ boolean_param("hap_2mb", opt_hap_2mb);
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef mfn_to_page
 #define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef mfn_valid
-#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
 #undef page_to_mfn
 #define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
 
@@ -83,6 +81,8 @@ static int p2m_initialise(struct domain *d, struct p2m_domain *p2m)
         ret = ept_p2m_init(p2m);
     else
         p2m_pt_init(p2m);
+
+    spin_lock_init(&p2m->ioreq.lock);
 
     return ret;
 }
@@ -147,15 +147,29 @@ static void p2m_teardown_hostp2m(struct domain *d)
     }
 }
 
-static void p2m_teardown_nestedp2m(struct domain *d);
+static void p2m_teardown_nestedp2m(struct domain *d)
+{
+    unsigned int i;
+    struct p2m_domain *p2m;
+
+    for ( i = 0; i < MAX_NESTEDP2M; i++ )
+    {
+        if ( !d->arch.nested_p2m[i] )
+            continue;
+        p2m = d->arch.nested_p2m[i];
+        list_del(&p2m->np2m_list);
+        p2m_free_one(p2m);
+        d->arch.nested_p2m[i] = NULL;
+    }
+}
 
 static int p2m_init_nestedp2m(struct domain *d)
 {
-    uint8_t i;
+    unsigned int i;
     struct p2m_domain *p2m;
 
     mm_lock_init(&d->arch.nested_p2m_lock);
-    for (i = 0; i < MAX_NESTEDP2M; i++)
+    for ( i = 0; i < MAX_NESTEDP2M; i++ )
     {
         d->arch.nested_p2m[i] = p2m = p2m_init_one(d);
         if ( p2m == NULL )
@@ -169,22 +183,6 @@ static int p2m_init_nestedp2m(struct domain *d)
     }
 
     return 0;
-}
-
-static void p2m_teardown_nestedp2m(struct domain *d)
-{
-    uint8_t i;
-    struct p2m_domain *p2m;
-
-    for (i = 0; i < MAX_NESTEDP2M; i++)
-    {
-        if ( !d->arch.nested_p2m[i] )
-            continue;
-        p2m = d->arch.nested_p2m[i];
-        list_del(&p2m->np2m_list);
-        p2m_free_one(p2m);
-        d->arch.nested_p2m[i] = NULL;
-    }
 }
 
 static void p2m_teardown_altp2m(struct domain *d)
@@ -288,6 +286,71 @@ void p2m_memory_type_changed(struct domain *d)
         p2m->memory_type_changed(p2m);
         p2m_unlock(p2m);
     }
+}
+
+int p2m_set_ioreq_server(struct domain *d,
+                         unsigned int flags,
+                         struct hvm_ioreq_server *s)
+{
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    int rc;
+
+    /*
+     * Use lock to prevent concurrent setting attempts
+     * from multiple ioreq servers.
+     */
+    spin_lock(&p2m->ioreq.lock);
+
+    /* Unmap ioreq server from p2m type by passing flags with 0. */
+    if ( flags == 0 )
+    {
+        rc = -EINVAL;
+        if ( p2m->ioreq.server != s )
+            goto out;
+
+        p2m->ioreq.server = NULL;
+        p2m->ioreq.flags = 0;
+    }
+    else
+    {
+        rc = -EBUSY;
+        if ( p2m->ioreq.server != NULL )
+            goto out;
+
+        /*
+         * It is possible that an ioreq server has just been unmapped,
+         * released the spin lock, with some p2m_ioreq_server entries
+         * in p2m table remained. We shall refuse another ioreq server
+         * mapping request in such case.
+         */
+        if ( read_atomic(&p2m->ioreq.entry_count) )
+            goto out;
+
+        p2m->ioreq.server = s;
+        p2m->ioreq.flags = flags;
+    }
+
+    rc = 0;
+
+ out:
+    spin_unlock(&p2m->ioreq.lock);
+
+    return rc;
+}
+
+struct hvm_ioreq_server *p2m_get_ioreq_server(struct domain *d,
+                                              unsigned int *flags)
+{
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    struct hvm_ioreq_server *s;
+
+    spin_lock(&p2m->ioreq.lock);
+
+    s = p2m->ioreq.server;
+    *flags = p2m->ioreq.flags;
+
+    spin_unlock(&p2m->ioreq.lock);
+    return s;
 }
 
 void p2m_enable_hardware_log_dirty(struct domain *d)
@@ -593,7 +656,7 @@ int p2m_alloc_table(struct p2m_domain *p2m)
 }
 
 /*
- * pvh fixme: when adding support for pvh non-hardware domains, this path must
+ * hvm fixme: when adding support for pvh non-hardware domains, this path must
  * cleanup any foreign p2m types (release refcnts on them).
  */
 void p2m_teardown(struct p2m_domain *p2m)
@@ -948,6 +1011,35 @@ void p2m_change_type_range(struct domain *d,
     p2m_unlock(p2m);
 }
 
+/* Synchronously modify the p2m type for a range of gfns from ot to nt. */
+void p2m_finish_type_change(struct domain *d,
+                            gfn_t first_gfn, unsigned long max_nr,
+                            p2m_type_t ot, p2m_type_t nt)
+{
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    p2m_type_t t;
+    unsigned long gfn = gfn_x(first_gfn);
+    unsigned long last_gfn = gfn + max_nr - 1;
+
+    ASSERT(ot != nt);
+    ASSERT(p2m_is_changeable(ot) && p2m_is_changeable(nt));
+
+    p2m_lock(p2m);
+
+    last_gfn = min(last_gfn, p2m->max_mapped_pfn);
+    while ( gfn <= last_gfn )
+    {
+        get_gfn_query_unlocked(d, gfn, &t);
+
+        if ( t == ot )
+            p2m_change_type_one(d, gfn, t, nt);
+
+        gfn++;
+    }
+
+    p2m_unlock(p2m);
+}
+
 /*
  * Returns:
  *    0              for success
@@ -1053,16 +1145,7 @@ int set_identity_p2m_entry(struct domain *d, unsigned long gfn,
         ret = p2m_set_entry(p2m, gfn, _mfn(gfn), PAGE_ORDER_4K,
                             p2m_mmio_direct, p2ma);
     else if ( mfn_x(mfn) == gfn && p2mt == p2m_mmio_direct && a == p2ma )
-    {
         ret = 0;
-        /*
-         * PVH fixme: during Dom0 PVH construction, p2m entries are being set
-         * but iomem regions are not mapped with IOMMU. This makes sure that
-         * RMRRs are correctly mapped with IOMMU.
-         */
-        if ( is_hardware_domain(d) && !iommu_use_hap_pt(d) )
-            ret = iommu_map_page(d, gfn, gfn, IOMMUF_readable|IOMMUF_writable);
-    }
     else
     {
         if ( flag & XEN_DOMCTL_DEV_RDM_RELAXED )
@@ -1240,7 +1323,7 @@ int p2m_mem_paging_nominate(struct domain *d, unsigned long gfn)
         goto out;
 
     /* Check for io memory page */
-    if ( is_iomem_page(mfn_x(mfn)) )
+    if ( is_iomem_page(mfn) )
         goto out;
 
     /* Check page count and type */
@@ -1620,14 +1703,17 @@ p2m_flush_table(struct p2m_domain *p2m)
 
     p2m_lock(p2m);
 
-    /* "Host" p2m tables can have shared entries &c that need a bit more 
-     * care when discarding them */
+    /*
+     * "Host" p2m tables can have shared entries &c that need a bit more care
+     * when discarding them.
+     */
     ASSERT(!p2m_is_hostp2m(p2m));
     /* Nested p2m's do not do pod, hence the asserts (and no pod lock)*/
     ASSERT(page_list_empty(&p2m->pod.super));
     ASSERT(page_list_empty(&p2m->pod.single));
 
-    if ( p2m->np2m_base == P2M_BASE_EADDR )
+    /* No need to flush if it's already empty */
+    if ( p2m_is_nestedp2m(p2m) && p2m->np2m_base == P2M_BASE_EADDR )
     {
         p2m_unlock(p2m);
         return;
@@ -1635,19 +1721,21 @@ p2m_flush_table(struct p2m_domain *p2m)
 
     /* This is no longer a valid nested p2m for any address space */
     p2m->np2m_base = P2M_BASE_EADDR;
-    
-    /* Zap the top level of the trie */
-    mfn = pagetable_get_mfn(p2m_get_pagetable(p2m));
-    clear_domain_page(mfn);
 
     /* Make sure nobody else is using this p2m table */
     nestedhvm_vmcx_flushtlb(p2m);
 
+    /* Zap the top level of the trie */
+    mfn = pagetable_get_mfn(p2m_get_pagetable(p2m));
+    clear_domain_page(mfn);
+
     /* Free the rest of the trie pages back to the paging pool */
     top = mfn_to_page(mfn);
     while ( (pg = page_list_remove_head(&p2m->pages)) )
-        if ( pg != top ) 
+    {
+        if ( pg != top )
             d->arch.paging.free_page(d, pg);
+    }
     page_list_add(top, &p2m->pages);
 
     p2m_unlock(p2m);
@@ -1782,17 +1870,18 @@ unsigned long paging_gva_to_gfn(struct vcpu *v,
 }
 
 /*
- * If the map is non-NULL, we leave this function having
- * acquired an extra ref on mfn_to_page(*mfn).
+ * If the map is non-NULL, we leave this function having acquired an extra ref
+ * on mfn_to_page(*mfn).  In all cases, *pfec contains appropriate
+ * synthetic/structure PFEC_* bits.
  */
 void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
-                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *rc)
+                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *pfec)
 {
     struct page_info *page;
 
-    if ( gfn_x(gfn) >> p2m->domain->arch.paging.gfn_bits )
+    if ( !gfn_valid(p2m->domain, gfn) )
     {
-        *rc = _PAGE_INVALID_BIT;
+        *pfec = PFEC_reserved_bit | PFEC_page_present;
         return NULL;
     }
 
@@ -1804,21 +1893,23 @@ void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
         if ( page )
             put_page(page);
         p2m_mem_paging_populate(p2m->domain, gfn_x(gfn));
-        *rc = _PAGE_PAGED;
+        *pfec = PFEC_page_paged;
         return NULL;
     }
     if ( p2m_is_shared(*p2mt) )
     {
         if ( page )
             put_page(page);
-        *rc = _PAGE_SHARED;
+        *pfec = PFEC_page_shared;
         return NULL;
     }
     if ( !page )
     {
-        *rc |= _PAGE_PRESENT;
+        *pfec = 0;
         return NULL;
     }
+
+    *pfec = PFEC_page_present;
     *mfn = page_to_mfn(page);
     ASSERT(mfn_valid(*mfn));
 
@@ -2419,10 +2510,10 @@ int p2m_add_foreign(struct domain *tdom, unsigned long fgfn,
     struct domain *fdom;
 
     ASSERT(tdom);
-    if ( foreigndom == DOMID_SELF || !is_pvh_domain(tdom) )
+    if ( foreigndom == DOMID_SELF )
         return -EINVAL;
     /*
-     * pvh fixme: until support is added to p2m teardown code to cleanup any
+     * hvm fixme: until support is added to p2m teardown code to cleanup any
      * foreign entries, limit this to hardware domain only.
      */
     if ( !is_hardware_domain(tdom) )

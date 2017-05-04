@@ -9,12 +9,10 @@
  * Copyright (c) 1991, 1992, 1995  Linus Torvalds
  */
 
-#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/event.h>
 #include <xen/sched.h>
 #include <xen/lib.h>
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/time.h>
 #include <xen/timer.h>
@@ -197,7 +195,7 @@ static void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
         return;
 
     /* Only for start-of-day interruopt tests in io_apic.c. */
-    (*(volatile unsigned long *)&pit0_ticks)++;
+    pit0_ticks++;
 
     /* Rough hack to allow accurate timers to sort-of-work with no APIC. */
     if ( !cpu_has_apic )
@@ -942,7 +940,7 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
     }
     else
     {
-        if ( has_hvm_container_domain(d) && hvm_tsc_scaling_supported )
+        if ( is_hvm_domain(d) && hvm_tsc_scaling_supported )
         {
             tsc_stamp            = hvm_scale_tsc(d, t->stamp.local_tsc);
             _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
@@ -993,17 +991,18 @@ bool_t update_secondary_system_time(struct vcpu *v,
                                     struct vcpu_time_info *u)
 {
     XEN_GUEST_HANDLE(vcpu_time_info_t) user_u = v->arch.time_info_guest;
-    smap_check_policy_t saved_policy;
+    struct guest_memory_policy policy =
+        { .smap_policy = SMAP_CHECK_ENABLED, .nested_guest_mode = false };
 
     if ( guest_handle_is_null(user_u) )
         return 1;
 
-    saved_policy = smap_policy_change(v, SMAP_CHECK_ENABLED);
+    update_guest_memory_policy(v, &policy);
 
     /* 1. Update userspace version. */
     if ( __copy_field_to_guest(user_u, u, version) == sizeof(u->version) )
     {
-        smap_policy_change(v, saved_policy);
+        update_guest_memory_policy(v, &policy);
         return 0;
     }
     wmb();
@@ -1014,7 +1013,7 @@ bool_t update_secondary_system_time(struct vcpu *v,
     u->version = version_update_end(u->version);
     __copy_field_to_guest(user_u, u, version);
 
-    smap_policy_change(v, saved_policy);
+    update_guest_memory_policy(v, &policy);
 
     return 1;
 }
@@ -1638,8 +1637,25 @@ static int __init verify_tsc_reliability(void)
 
             printk("Switched to Platform timer %s TSC\n",
                    freq_string(plt_src.frequency));
+            return 0;
         }
     }
+
+    /*
+     * Re-run the TSC writability check if it didn't run to completion, as
+     * X86_FEATURE_TSC_RELIABLE may have been cleared by now. This is needed
+     * for determining which rendezvous function to use (below).
+     */
+    if ( !disable_tsc_sync )
+        tsc_check_writability();
+
+    /*
+     * While with constant-rate TSCs the scale factor can be shared, when TSCs
+     * are not marked as 'reliable', re-sync during rendezvous.
+     */
+    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) &&
+         !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
+        time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
 
     return 0;
 }
@@ -1649,14 +1665,6 @@ __initcall(verify_tsc_reliability);
 int __init init_xen_time(void)
 {
     tsc_check_writability();
-
-    /* If we have constant-rate TSCs then scale factor can be shared. */
-    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
-    {
-        /* If TSCs are not marked as 'reliable', re-sync during rendezvous. */
-        if ( !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
-            time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
-    }
 
     open_softirq(TIME_CALIBRATE_SOFTIRQ, local_time_calibration);
 
@@ -1943,7 +1951,7 @@ void tsc_get_info(struct domain *d, uint32_t *tsc_mode,
                   uint64_t *elapsed_nsec, uint32_t *gtsc_khz,
                   uint32_t *incarnation)
 {
-    bool_t enable_tsc_scaling = has_hvm_container_domain(d) &&
+    bool_t enable_tsc_scaling = is_hvm_domain(d) &&
                                 hvm_tsc_scaling_supported && !d->arch.vtsc;
 
     *incarnation = d->arch.incarnation;
@@ -2006,33 +2014,6 @@ void tsc_set_info(struct domain *d,
         d->arch.vtsc = 0;
         return;
     }
-    if ( is_pvh_domain(d) )
-    {
-        /*
-         * PVH fixme: support more tsc modes.
-         *
-         * NB: The reason this is disabled here appears to be with
-         * additional support required to do the PV RDTSC emulation.
-         * Since we're no longer taking the PV emulation path for
-         * anything, we may be able to remove this restriction.
-         *
-         * pvhfixme: Experiments show that "default" works for PVH,
-         * but "always_emulate" does not for some reason.  Figure out
-         * why.
-         */
-        switch ( tsc_mode )
-        {
-        case TSC_MODE_NEVER_EMULATE:
-            break;
-        default:
-            printk(XENLOG_WARNING
-                   "PVH currently does not support tsc emulation. Setting timer_mode = never_emulate\n");
-            /* FALLTHRU */
-        case TSC_MODE_DEFAULT:
-            tsc_mode = TSC_MODE_NEVER_EMULATE;
-            break;
-        }
-    }
 
     switch ( d->arch.tsc_mode = tsc_mode )
     {
@@ -2043,17 +2024,18 @@ void tsc_set_info(struct domain *d,
         d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
         d->arch.tsc_khz = gtsc_khz ?: cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000);
+
         /*
-         * In default mode use native TSC if the host has safe TSC and:
-         *  HVM/PVH: host and guest frequencies are the same (either
-         *           "naturally" or via TSC scaling)
-         *  PV: guest has not migrated yet (and thus arch.tsc_khz == cpu_khz)
+         * In default mode use native TSC if the host has safe TSC and
+         * host and guest frequencies are the same (either "naturally" or
+         * - for HVM/PVH - via TSC scaling).
+         * When a guest is created, gtsc_khz is passed in as zero, making
+         * d->arch.tsc_khz == cpu_khz. Thus no need to check incarnation.
          */
         if ( tsc_mode == TSC_MODE_DEFAULT && host_tsc_is_safe() &&
-             (has_hvm_container_domain(d) ?
-              (d->arch.tsc_khz == cpu_khz ||
-               hvm_get_tsc_scaling_ratio(d->arch.tsc_khz)) :
-              incarnation == 0) )
+             (d->arch.tsc_khz == cpu_khz ||
+              (is_hvm_domain(d) &&
+               hvm_get_tsc_scaling_ratio(d->arch.tsc_khz))) )
         {
     case TSC_MODE_NEVER_EMULATE:
             d->arch.vtsc = 0;
@@ -2065,8 +2047,7 @@ void tsc_set_info(struct domain *d,
     case TSC_MODE_PVRDTSCP:
         d->arch.vtsc = !boot_cpu_has(X86_FEATURE_RDTSCP) ||
                        !host_tsc_is_safe();
-        enable_tsc_scaling = has_hvm_container_domain(d) &&
-                             !d->arch.vtsc &&
+        enable_tsc_scaling = is_hvm_domain(d) && !d->arch.vtsc &&
                              hvm_get_tsc_scaling_ratio(gtsc_khz ?: cpu_khz);
         d->arch.tsc_khz = (enable_tsc_scaling && gtsc_khz) ? gtsc_khz : cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000 );
@@ -2083,7 +2064,7 @@ void tsc_set_info(struct domain *d,
         break;
     }
     d->arch.incarnation = incarnation + 1;
-    if ( has_hvm_container_domain(d) )
+    if ( is_hvm_domain(d) )
     {
         if ( hvm_tsc_scaling_supported && !d->arch.vtsc )
             d->arch.hvm_domain.tsc_scaling_ratio =

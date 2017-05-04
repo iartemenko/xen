@@ -370,7 +370,6 @@ int xc_domain_getinfo(xc_interface *xch,
         info->running  = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_running);
         info->hvm      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_hvm_guest);
         info->debugged = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_debugged);
-        info->pvh      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_pvh_guest);
         info->xenstore = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_xs_domain);
         info->hap      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_hap);
 
@@ -551,6 +550,67 @@ int xc_vcpu_getcontext(xc_interface *xch,
     rc = do_domctl(xch, &domctl);
 
     xc_hypercall_bounce_post(xch, ctxt);
+
+    return rc;
+}
+
+int xc_vcpu_get_extstate(xc_interface *xch,
+                         uint32_t domid,
+                         uint32_t vcpu,
+                         xc_vcpu_extstate_t *extstate)
+{
+    int rc = -ENODEV;
+#if defined (__i386__) || defined(__x86_64__)
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BUFFER(void, buffer);
+    bool get_state;
+
+    if ( !extstate )
+        return -EINVAL;
+
+    domctl.cmd = XEN_DOMCTL_getvcpuextstate;
+    domctl.domain = (domid_t)domid;
+    domctl.u.vcpuextstate.vcpu = (uint16_t)vcpu;
+    domctl.u.vcpuextstate.xfeature_mask = extstate->xfeature_mask;
+    domctl.u.vcpuextstate.size = extstate->size;
+
+    get_state = (extstate->size != 0);
+
+    if ( get_state )
+    {
+        buffer = xc_hypercall_buffer_alloc(xch, buffer, extstate->size);
+
+        if ( !buffer )
+        {
+            PERROR("Unable to allocate memory for vcpu%u's xsave context",
+                   vcpu);
+            rc = -ENOMEM;
+            goto out;
+        }
+
+        set_xen_guest_handle(domctl.u.vcpuextstate.buffer, buffer);
+    }
+
+    rc = do_domctl(xch, &domctl);
+
+    if ( rc )
+        goto out;
+
+    /* A query for the size of buffer to use. */
+    if ( !extstate->size && !extstate->xfeature_mask )
+    {
+        extstate->xfeature_mask = domctl.u.vcpuextstate.xfeature_mask;
+        extstate->size = domctl.u.vcpuextstate.size;
+        goto out;
+    }
+
+    if ( get_state )
+        memcpy(extstate->buffer, buffer, extstate->size);
+
+out:
+    if ( get_state )
+        xc_hypercall_buffer_free(xch, buffer);
+#endif
 
     return rc;
 }
@@ -1410,207 +1470,6 @@ int xc_get_hvm_param(xc_interface *handle, domid_t dom, int param, unsigned long
         return ret;
     *value = v;
     return 0;
-}
-
-int xc_hvm_create_ioreq_server(xc_interface *xch,
-                               domid_t domid,
-                               int handle_bufioreq,
-                               ioservid_t *id)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_create_ioreq_server *data;
-    int rc;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_create_ioreq_server;
-    data = &op.u.create_ioreq_server;
-
-    data->handle_bufioreq = handle_bufioreq;
-
-    rc = do_dm_op(xch, domid, 1, &op, sizeof(op));
-    if ( rc )
-        return rc;
-
-    *id = data->id;
-
-    return 0;
-}
-
-int xc_hvm_get_ioreq_server_info(xc_interface *xch,
-                                 domid_t domid,
-                                 ioservid_t id,
-                                 xen_pfn_t *ioreq_pfn,
-                                 xen_pfn_t *bufioreq_pfn,
-                                 evtchn_port_t *bufioreq_port)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_get_ioreq_server_info *data;
-    int rc;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_get_ioreq_server_info;
-    data = &op.u.get_ioreq_server_info;
-
-    data->id = id;
-
-    rc = do_dm_op(xch, domid, 1, &op, sizeof(op));
-    if ( rc )
-        return rc;
-
-    if ( ioreq_pfn )
-        *ioreq_pfn = data->ioreq_pfn;
-
-    if ( bufioreq_pfn )
-        *bufioreq_pfn = data->bufioreq_pfn;
-
-    if ( bufioreq_port )
-        *bufioreq_port = data->bufioreq_port;
-
-    return 0;
-}
-
-int xc_hvm_map_io_range_to_ioreq_server(xc_interface *xch, domid_t domid,
-                                        ioservid_t id, int is_mmio,
-                                        uint64_t start, uint64_t end)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_ioreq_server_range *data;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_map_io_range_to_ioreq_server;
-    data = &op.u.map_io_range_to_ioreq_server;
-
-    data->id = id;
-    data->type = is_mmio ? XEN_DMOP_IO_RANGE_MEMORY : XEN_DMOP_IO_RANGE_PORT;
-    data->start = start;
-    data->end = end;
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
-}
-
-int xc_hvm_unmap_io_range_from_ioreq_server(xc_interface *xch, domid_t domid,
-                                            ioservid_t id, int is_mmio,
-                                            uint64_t start, uint64_t end)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_ioreq_server_range *data;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_unmap_io_range_from_ioreq_server;
-    data = &op.u.unmap_io_range_from_ioreq_server;
-
-    data->id = id;
-    data->type = is_mmio ? XEN_DMOP_IO_RANGE_MEMORY : XEN_DMOP_IO_RANGE_PORT;
-    data->start = start;
-    data->end = end;
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
-}
-
-int xc_hvm_map_pcidev_to_ioreq_server(xc_interface *xch, domid_t domid,
-                                      ioservid_t id, uint16_t segment,
-                                      uint8_t bus, uint8_t device,
-                                      uint8_t function)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_ioreq_server_range *data;
-
-    if (device > 0x1f || function > 0x7) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_map_io_range_to_ioreq_server;
-    data = &op.u.map_io_range_to_ioreq_server;
-
-    data->id = id;
-    data->type = XEN_DMOP_IO_RANGE_PCI;
-
-    /*
-     * The underlying hypercall will deal with ranges of PCI SBDF
-     * but, for simplicity, the API only uses singletons.
-     */
-    data->start = data->end = XEN_DMOP_PCI_SBDF((uint64_t)segment,
-                                                (uint64_t)bus,
-                                                (uint64_t)device,
-                                                (uint64_t)function);
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
-}
-
-int xc_hvm_unmap_pcidev_from_ioreq_server(xc_interface *xch, domid_t domid,
-                                          ioservid_t id, uint16_t segment,
-                                          uint8_t bus, uint8_t device,
-                                          uint8_t function)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_ioreq_server_range *data;
-
-    if (device > 0x1f || function > 0x7) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_unmap_io_range_from_ioreq_server;
-    data = &op.u.unmap_io_range_from_ioreq_server;
-
-    data->id = id;
-    data->type = XEN_DMOP_IO_RANGE_PCI;
-
-    /*
-     * The underlying hypercall will deal with ranges of PCI SBDF
-     * but, for simplicity, the API only uses singletons.
-     */
-    data->start = data->end = XEN_DMOP_PCI_SBDF((uint64_t)segment,
-                                                (uint64_t)bus,
-                                                (uint64_t)device,
-                                                (uint64_t)function);
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
-}
-
-int xc_hvm_destroy_ioreq_server(xc_interface *xch,
-                                domid_t domid,
-                                ioservid_t id)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_destroy_ioreq_server *data;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_destroy_ioreq_server;
-    data = &op.u.destroy_ioreq_server;
-
-    data->id = id;
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
-}
-
-int xc_hvm_set_ioreq_server_state(xc_interface *xch,
-                                  domid_t domid,
-                                  ioservid_t id,
-                                  int enabled)
-{
-    struct xen_dm_op op;
-    struct xen_dm_op_set_ioreq_server_state *data;
-
-    memset(&op, 0, sizeof(op));
-
-    op.op = XEN_DMOP_set_ioreq_server_state;
-    data = &op.u.set_ioreq_server_state;
-
-    data->id = id;
-    data->enabled = !!enabled;
-
-    return do_dm_op(xch, domid, 1, &op, sizeof(op));
 }
 
 int xc_domain_setdebugging(xc_interface *xch,

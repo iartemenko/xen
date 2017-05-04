@@ -125,9 +125,10 @@ struct hvm_domain {
 
     /* Lock protects access to irq, vpic and vioapic. */
     spinlock_t             irq_lock;
-    struct hvm_irq         irq;
+    struct hvm_irq        *irq;
     struct hvm_hw_vpic     vpic[2]; /* 0=master; 1=slave */
-    struct hvm_vioapic    *vioapic;
+    struct hvm_vioapic    **vioapic;
+    unsigned int           nr_vioapics;
     struct hvm_hw_stdvga   stdvga;
 
     /*
@@ -179,6 +180,9 @@ struct hvm_domain {
     uint64_t tsc_scaling_ratio;
 
     unsigned long *io_bitmap;
+
+    /* List of guest to machine IO ports mapping. */
+    struct list_head g2m_ioport_list;
 
     /* List of permanently write-mapped pages. */
     struct {

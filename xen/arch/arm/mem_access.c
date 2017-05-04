@@ -16,7 +16,6 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/mem_access.h>
 #include <xen/monitor.h>
 #include <xen/sched.h>
@@ -173,7 +172,7 @@ p2m_mem_access_check_and_get_page(vaddr_t gva, unsigned long flag,
     if ( mfn_eq(mfn, INVALID_MFN) )
         goto err;
 
-    if ( !mfn_valid(mfn_x(mfn)) )
+    if ( !mfn_valid(mfn) )
         goto err;
 
     /*

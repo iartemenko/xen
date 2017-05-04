@@ -32,7 +32,6 @@
 
 #ifndef __ASSEMBLY__
 
-#include <xen/config.h>
 #include <asm/types.h>
 
 #include <xen/pdx.h>
@@ -151,12 +150,6 @@ typedef l4_pgentry_t root_pgentry_t;
 
 /* Bit 22 of a 24-bit flag mask. This corresponds to bit 62 of a pte.*/
 #define _PAGE_GNTTAB (1U<<22)
-
-/*
- * Bit 24 of a 24-bit flag mask!  This is not any bit of a real pte,
- * and is only used for signalling in variables that contain flags.
- */
-#define _PAGE_INVALID_BIT (1U<<24)
 
 /*
  * Bit 12 of a 24-bit flag mask. This corresponds to bit 52 of a pte.

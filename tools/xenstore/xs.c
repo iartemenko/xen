@@ -769,14 +769,6 @@ unwind:
 	return false;
 }
 
-bool xs_restrict(struct xs_handle *h, unsigned domid)
-{
-	char buf[16];
-
-	sprintf(buf, "%d", domid);
-	return xs_bool(xs_single(h, XBT_NULL, XS_RESTRICT, buf, NULL));
-}
-
 /* Watch a node for changes (poll on fd to detect, or call read_watch()).
  * When the node (or any child) changes, fd will become readable.
  * Token is returned when watch is read, to allow matching.
@@ -1173,9 +1165,8 @@ out:
     return port;
 }
 
-/* Only useful for DEBUG versions */
-char *xs_debug_command(struct xs_handle *h, const char *cmd,
-		       void *data, unsigned int len)
+char *xs_control_command(struct xs_handle *h, const char *cmd,
+			 void *data, unsigned int len)
 {
 	struct iovec iov[2];
 
@@ -1184,8 +1175,14 @@ char *xs_debug_command(struct xs_handle *h, const char *cmd,
 	iov[1].iov_base = data;
 	iov[1].iov_len = len;
 
-	return xs_talkv(h, XBT_NULL, XS_DEBUG, iov,
+	return xs_talkv(h, XBT_NULL, XS_CONTROL, iov,
 			ARRAY_SIZE(iov), NULL);
+}
+
+char *xs_debug_command(struct xs_handle *h, const char *cmd,
+		       void *data, unsigned int len)
+{
+	return xs_control_command(h, cmd, data, len);
 }
 
 static int read_message(struct xs_handle *h, int nonblocking)

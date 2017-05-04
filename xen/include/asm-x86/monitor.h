@@ -83,6 +83,9 @@ static inline uint32_t arch_monitor_get_capabilities(struct domain *d)
     if ( hvm_is_singlestep_supported() )
         capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP);
 
+    if ( hvm_funcs.set_descriptor_access_exiting )
+        capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_DESC_ACCESS);
+
     return capabilities;
 }
 

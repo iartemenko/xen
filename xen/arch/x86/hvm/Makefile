@@ -3,9 +3,11 @@ subdir-y += vmx
 
 obj-y += asid.o
 obj-y += dm.o
+obj-bin-y += dom0_build.init.o
 obj-y += emulate.o
 obj-y += hpet.o
 obj-y += hvm.o
+obj-y += hypercall.o
 obj-y += i8254.o
 obj-y += intercept.o
 obj-y += io.o

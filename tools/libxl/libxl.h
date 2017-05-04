@@ -210,6 +210,12 @@
 #define LIBXL_HAVE_SCHED_RTDS 1
 
 /*
+ * LIBXL_HAVE_SCHED_NULL indicates that the 'null' static scheduler
+ * is available.
+ */
+#define LIBXL_HAVE_SCHED_NULL 1
+
+/*
  * libxl_domain_build_info has u.hvm.viridian_enable and _disable bitmaps
  * of the specified width.
  */
@@ -286,6 +292,18 @@
  * wide parameters (i.e., the ratelimiting value).
  */
 #define LIBXL_HAVE_SCHED_CREDIT2_PARAMS 1
+
+/*
+ * LIBXL_HAVE_VIRIDIAN_CRASH_CTL indicates that the 'crash_ctl' value
+ * is present in the viridian enlightenment enumeration.
+ */
+#define LIBXL_HAVE_VIRIDIAN_CRASH_CTL 1
+
+/*
+ * LIBXL_HAVE_BUILDINFO_HVM_ACPI_LAPTOP_SLATE indicates that
+ * libxl_domain_build_info has the u.hvm.acpi_laptop_slate field.
+ */
+#define LIBXL_HAVE_BUILDINFO_HVM_ACPI_LAPTOP_SLATE 1
 
 /*
  * libxl ABI compatibility
@@ -718,12 +736,6 @@ typedef struct libxl__ctx libxl_ctx;
 #define LIBXL_HAVE_DOMAIN_CREATE_RESTORE_SEND_BACK_FD 1
 
 /*
- * LIBXL_HAVE_CREATEINFO_PVH
- * If this is defined, then libxl supports creation of a PVH guest.
- */
-#define LIBXL_HAVE_CREATEINFO_PVH 1
-
-/*
  * LIBXL_HAVE_DRIVER_DOMAIN_CREATION 1
  *
  * If this is defined, libxl_domain_create_info contains a driver_domain
@@ -869,6 +881,12 @@ typedef struct libxl__ctx libxl_ctx;
  * If this is defined, then libxl supports remus.
  */
 #define LIBXL_HAVE_REMUS 1
+
+/*
+ * LIBXL_HAVE_COLO_USERSPACE_PROXY
+ * If this is defined, then libxl supports COLO userspace proxy.
+ */
+#define LIBXL_HAVE_COLO_USERSPACE_PROXY 1
 
 typedef uint8_t libxl_mac[6];
 #define LIBXL_MAC_FMT "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx"
@@ -1859,6 +1877,16 @@ int libxl_device_vfb_destroy(libxl_ctx *ctx, uint32_t domid,
                              const libxl_asyncop_how *ao_how)
                              LIBXL_EXTERNAL_CALLERS_ONLY;
 
+/* 9pfs */
+int libxl_device_p9_remove(libxl_ctx *ctx, uint32_t domid,
+                           libxl_device_p9 *p9,
+                           const libxl_asyncop_how *ao_how)
+                           LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_p9_destroy(libxl_ctx *ctx, uint32_t domid,
+                            libxl_device_p9 *p9,
+                            const libxl_asyncop_how *ao_how)
+                            LIBXL_EXTERNAL_CALLERS_ONLY;
+
 /* PCI Passthrough */
 int libxl_device_pci_add(libxl_ctx *ctx, uint32_t domid,
                          libxl_device_pci *pcidev,
@@ -2086,6 +2114,12 @@ int libxl_tmem_shared_auth(libxl_ctx *ctx, uint32_t domid, char* uuid,
 int libxl_tmem_freeable(libxl_ctx *ctx);
 
 int libxl_get_freecpus(libxl_ctx *ctx, libxl_bitmap *cpumap);
+
+/*
+ * Set poolid to LIBXL_CPUOOL_POOLID_ANY to have Xen choose a
+ * free poolid for you.
+ */
+#define LIBXL_CPUPOOL_POOLID_ANY 0xFFFFFFFF
 int libxl_cpupool_create(libxl_ctx *ctx, const char *name,
                          libxl_scheduler sched,
                          libxl_bitmap cpumap, libxl_uuid *uuid,

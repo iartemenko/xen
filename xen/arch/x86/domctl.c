@@ -4,7 +4,6 @@
  * Copyright (c) 2002-2006, K A Fraser
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -48,51 +47,12 @@ static int gdbsx_guest_mem_io(domid_t domid, struct xen_domctl_gdbsx_memio *iop)
     return iop->remain ? -EFAULT : 0;
 }
 
-static int update_legacy_cpuid_array(struct domain *d,
-                                     const xen_domctl_cpuid_t *ctl)
-{
-    xen_domctl_cpuid_t *cpuid, *unused = NULL;
-    unsigned int i;
-
-    /* Try to insert ctl into d->arch.cpuids[] */
-    for ( i = 0; i < MAX_CPUID_INPUT; i++ )
-    {
-        cpuid = &d->arch.cpuid->legacy[i];
-
-        if ( cpuid->input[0] == XEN_CPUID_INPUT_UNUSED )
-        {
-            if ( !unused )
-                unused = cpuid;
-            continue;
-        }
-
-        if ( (cpuid->input[0] == ctl->input[0]) &&
-             ((cpuid->input[1] == XEN_CPUID_INPUT_UNUSED) ||
-              (cpuid->input[1] == ctl->input[1])) )
-            break;
-    }
-
-    if ( !(ctl->eax | ctl->ebx | ctl->ecx | ctl->edx) )
-    {
-        if ( i < MAX_CPUID_INPUT )
-            cpuid->input[0] = XEN_CPUID_INPUT_UNUSED;
-    }
-    else if ( i < MAX_CPUID_INPUT )
-        *cpuid = *ctl;
-    else if ( unused )
-        *unused = *ctl;
-    else
-        return -ENOENT;
-
-    return 0;
-}
-
 static int update_domain_cpuid_info(struct domain *d,
                                     const xen_domctl_cpuid_t *ctl)
 {
     struct cpuid_policy *p = d->arch.cpuid;
     const struct cpuid_leaf leaf = { ctl->eax, ctl->ebx, ctl->ecx, ctl->edx };
-    int rc, old_vendor = p->x86_vendor;
+    int old_vendor = p->x86_vendor;
 
     /*
      * Skip update for leaves we don't care about.  This avoids the overhead
@@ -102,6 +62,10 @@ static int update_domain_cpuid_info(struct domain *d,
     switch ( ctl->input[0] )
     {
     case 0x00000000 ... ARRAY_SIZE(p->basic.raw) - 1:
+        if ( ctl->input[0] == 4 &&
+             ctl->input[1] >= ARRAY_SIZE(p->cache.raw) )
+            return 0;
+
         if ( ctl->input[0] == 7 &&
              ctl->input[1] >= ARRAY_SIZE(p->feat.raw) )
             return 0;
@@ -122,20 +86,28 @@ static int update_domain_cpuid_info(struct domain *d,
         return 0;
     }
 
-    rc = update_legacy_cpuid_array(d, ctl);
-    if ( rc )
-        return rc;
-
     /* Insert ctl data into cpuid_policy. */
     switch ( ctl->input[0] )
     {
     case 0x00000000 ... ARRAY_SIZE(p->basic.raw) - 1:
-        if ( ctl->input[0] == 7 )
+        switch ( ctl->input[0] )
+        {
+        case 4:
+            p->cache.raw[ctl->input[1]] = leaf;
+            break;
+
+        case 7:
             p->feat.raw[ctl->input[1]] = leaf;
-        else if ( ctl->input[0] == XSTATE_CPUID )
+            break;
+
+        case XSTATE_CPUID:
             p->xstate.raw[ctl->input[1]] = leaf;
-        else
+            break;
+
+        default:
             p->basic.raw[ctl->input[0]] = leaf;
+            break;
+        }
         break;
 
     case 0x40000000:
@@ -250,6 +222,20 @@ static int update_domain_cpuid_info(struct domain *d,
                 mask &= ((uint64_t)eax << 32) | ebx;
 
             d->arch.pv_domain.cpuidmasks->_7ab0 = mask;
+        }
+        break;
+
+    case 0xa:
+        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL )
+            break;
+
+        /* If PMU version is zero then the guest doesn't have VPMU */
+        if ( p->basic.pmu_version == 0 )
+        {
+            struct vcpu *v;
+
+            for_each_vcpu ( d, v )
+                vpmu_destroy(v);
         }
         break;
 
@@ -619,9 +605,8 @@ long arch_do_domctl(
         break;
 
     case XEN_DOMCTL_get_address_size:
-        domctl->u.address_size.size =
-            (is_pv_32bit_domain(d) || is_pvh_32bit_domain(d)) ?
-            32 : BITS_PER_LONG;
+        domctl->u.address_size.size = is_pv_32bit_domain(d) ? 32 :
+                                                              BITS_PER_LONG;
         copyback = 1;
         break;
 
@@ -736,13 +721,20 @@ long arch_do_domctl(
 
     case XEN_DOMCTL_ioport_mapping:
     {
-        struct domain_iommu *hd;
         unsigned int fgp = domctl->u.ioport_mapping.first_gport;
         unsigned int fmp = domctl->u.ioport_mapping.first_mport;
         unsigned int np = domctl->u.ioport_mapping.nr_ports;
         unsigned int add = domctl->u.ioport_mapping.add_mapping;
+        struct hvm_domain *hvm_domain;
         struct g2m_ioport *g2m_ioport;
         int found = 0;
+
+        ret = -EOPNOTSUPP;
+        if ( !is_hvm_domain(d) )
+        {
+            printk(XENLOG_G_ERR "ioport_map against non-HVM domain\n");
+            break;
+        }
 
         ret = -EINVAL;
         if ( ((fgp | fmp | (np - 1)) >= MAX_IOPORTS) ||
@@ -762,14 +754,14 @@ long arch_do_domctl(
         if ( ret )
             break;
 
-        hd = dom_iommu(d);
+        hvm_domain = &d->arch.hvm_domain;
         if ( add )
         {
             printk(XENLOG_G_INFO
                    "ioport_map:add: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
 
-            list_for_each_entry(g2m_ioport, &hd->arch.g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
                 if (g2m_ioport->mport == fmp )
                 {
                     g2m_ioport->gport = fgp;
@@ -788,7 +780,7 @@ long arch_do_domctl(
                 g2m_ioport->gport = fgp;
                 g2m_ioport->mport = fmp;
                 g2m_ioport->np = np;
-                list_add_tail(&g2m_ioport->list, &hd->arch.g2m_ioport_list);
+                list_add_tail(&g2m_ioport->list, &hvm_domain->g2m_ioport_list);
             }
             if ( !ret )
                 ret = ioports_permit_access(d, fmp, fmp + np - 1);
@@ -803,7 +795,7 @@ long arch_do_domctl(
             printk(XENLOG_G_INFO
                    "ioport_map:remove: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
-            list_for_each_entry(g2m_ioport, &hd->arch.g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
                 if ( g2m_ioport->mport == fmp )
                 {
                     list_del(&g2m_ioport->list);
@@ -942,6 +934,8 @@ long arch_do_domctl(
     case XEN_DOMCTL_set_cpuid:
         if ( d == currd ) /* no domain_pause() */
             ret = -EINVAL;
+        else if ( d->creation_finished )
+            ret = -EEXIST; /* No changing once the domain is running. */
         else
         {
             domain_pause(d);
@@ -1251,7 +1245,7 @@ long arch_do_domctl(
         unsigned long pfn = domctl->u.set_broken_page_p2m.pfn;
         mfn_t mfn = get_gfn_query(d, pfn, &pt);
 
-        if ( unlikely(!mfn_valid(mfn_x(mfn))) || unlikely(!p2m_is_ram(pt)) )
+        if ( unlikely(!mfn_valid(mfn)) || unlikely(!p2m_is_ram(pt)) )
             ret = -EINVAL;
         else
             ret = p2m_change_type_one(d, pfn, pt, p2m_ram_broken);
@@ -1492,7 +1486,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 {
     unsigned int i;
     const struct domain *d = v->domain;
-    bool_t compat = is_pv_32bit_domain(d) || is_pvh_32bit_domain(d);
+    bool_t compat = is_pv_32bit_domain(d);
 #define c(fld) (!compat ? (c.nat->fld) : (c.cmp->fld))
 
     if ( !is_pv_domain(d) )
@@ -1524,7 +1518,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     for ( i = 0; i < ARRAY_SIZE(v->arch.debugreg); ++i )
         c(debugreg[i] = v->arch.debugreg[i]);
 
-    if ( has_hvm_container_domain(d) )
+    if ( is_hvm_domain(d) )
     {
         struct segment_register sreg;
 
@@ -1587,8 +1581,8 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
         }
 
         /* IOPL privileges are virtualised: merge back into returned eflags. */
-        BUG_ON((c(user_regs._eflags) & X86_EFLAGS_IOPL) != 0);
-        c(user_regs._eflags |= v->arch.pv_vcpu.iopl);
+        BUG_ON((c(user_regs.eflags) & X86_EFLAGS_IOPL) != 0);
+        c(user_regs.eflags |= v->arch.pv_vcpu.iopl);
 
         if ( !compat )
         {

@@ -1,11 +1,18 @@
 #ifndef __ARCH_ARM_MM__
 #define __ARCH_ARM_MM__
 
-#include <xen/config.h>
 #include <xen/kernel.h>
 #include <asm/page.h>
 #include <public/xen.h>
 #include <xen/pdx.h>
+
+#if defined(CONFIG_ARM_32)
+# include <asm/arm32/mm.h>
+#elif defined(CONFIG_ARM_64)
+# include <asm/arm64/mm.h>
+#else
+# error "unknown ARM variant"
+#endif
 
 /* Align Xen to a 2 MiB boundary. */
 #define XEN_PADDR_ALIGN (1 << 21)
@@ -33,12 +40,6 @@ struct page_info
         struct {
             /* Type reference count and various PGT_xxx flags and fields. */
             unsigned long type_info;
-            /*
-             * Reference count for page table used in the P2M code.
-             * The counter is protected by the p2m->lock of the
-             * associated domain.
-             */
-            unsigned long p2m_refcount;
         } inuse;
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         struct {
@@ -129,7 +130,7 @@ extern vaddr_t xenheap_virt_start;
 #else
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
 #define is_xen_heap_mfn(mfn) \
-    (mfn_valid(mfn) && is_xen_heap_page(__mfn_to_page(mfn)))
+    (mfn_valid(_mfn(mfn)) && is_xen_heap_page(__mfn_to_page(mfn)))
 #endif
 
 #define is_xen_fixed_mfn(mfn)                                   \
@@ -159,6 +160,8 @@ extern unsigned long total_pages;
 
 /* Boot-time pagetable setup */
 extern void setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr);
+/* Map FDT in boot pagetable */
+extern void *early_fdt_map(paddr_t fdt_paddr);
 /* Remove early mappings */
 extern void remove_early_mappings(void);
 /* Allocate and initialise pagetables for a secondary CPU. Sets init_ttbr to the
@@ -195,7 +198,7 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 
 /* XXX -- account for base */
 #define mfn_valid(mfn)        ({                                              \
-    unsigned long __m_f_n = (mfn);                                            \
+    unsigned long __m_f_n = mfn_x(mfn);                                       \
     likely(pfn_to_pdx(__m_f_n) >= frametable_base_pdx && __mfn_valid(__m_f_n)); \
 })
 

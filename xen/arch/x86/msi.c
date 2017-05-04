@@ -6,7 +6,6 @@
  * Copyright (C) Tom Long Nguyen (tom.l.nguyen@intel.com)
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/irq.h>
@@ -579,6 +578,8 @@ static struct msi_desc *alloc_msi_entry(unsigned int nr)
         entry[nr].dev = NULL;
         entry[nr].irq = -1;
         entry[nr].remap_index = -1;
+        entry[nr].pi_desc = NULL;
+        entry[nr].irte_initialized = false;
     }
 
     return entry;

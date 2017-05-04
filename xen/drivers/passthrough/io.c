@@ -195,7 +195,7 @@ struct hvm_irq_dpci *domain_get_irq_dpci(const struct domain *d)
     if ( !d || !is_hvm_domain(d) )
         return NULL;
 
-    return d->arch.hvm_domain.irq.dpci;
+    return hvm_domain_irq(d)->dpci;
 }
 
 void free_hvm_irq_dpci(struct hvm_irq_dpci *dpci)
@@ -259,52 +259,6 @@ static struct vcpu *vector_hashing_dest(const struct domain *d,
     return dest;
 }
 
-/*
- * The purpose of this routine is to find the right destination vCPU for
- * an interrupt which will be delivered by VT-d posted-interrupt. There
- * are several cases as below:
- *
- * - For lowest-priority interrupts, use vector-hashing mechanism to find
- *   the destination.
- * - Otherwise, for single destination interrupt, it is straightforward to
- *   find the destination vCPU and return true.
- * - For multicast/broadcast vCPU, we cannot handle it via interrupt posting,
- *   so return NULL.
- */
-static struct vcpu *pi_find_dest_vcpu(const struct domain *d, uint32_t dest_id,
-                                      bool_t dest_mode, uint8_t delivery_mode,
-                                      uint8_t gvec)
-{
-    unsigned int dest_vcpus = 0;
-    struct vcpu *v, *dest = NULL;
-
-    switch ( delivery_mode )
-    {
-    case dest_LowestPrio:
-        return vector_hashing_dest(d, dest_id, dest_mode, gvec);
-    case dest_Fixed:
-        for_each_vcpu ( d, v )
-        {
-            if ( !vlapic_match_dest(vcpu_vlapic(v), NULL, APIC_DEST_NOSHORT,
-                                    dest_id, dest_mode) )
-                continue;
-
-            dest_vcpus++;
-            dest = v;
-        }
-
-        /* For fixed mode, we only handle single-destination interrupts. */
-        if ( dest_vcpus == 1 )
-            return dest;
-
-        break;
-    default:
-        break;
-    }
-
-    return NULL;
-}
-
 int pt_irq_create_bind(
     struct domain *d, xen_domctl_bind_pt_irq_t *pt_irq_bind)
 {
@@ -330,10 +284,10 @@ int pt_irq_create_bind(
             spin_unlock(&d->event_lock);
             return -ENOMEM;
         }
-        for ( i = 0; i < NR_HVM_IRQS; i++ )
+        for ( i = 0; i < NR_HVM_DOMU_IRQS; i++ )
             INIT_LIST_HEAD(&hvm_irq_dpci->girq[i]);
 
-        d->arch.hvm_domain.irq.dpci = hvm_irq_dpci;
+        hvm_domain_irq(d)->dpci = hvm_irq_dpci;
     }
 
     info = pirq_get_info(d, pirq);
@@ -365,6 +319,7 @@ int pt_irq_create_bind(
     {
         uint8_t dest, dest_mode, delivery_mode;
         int dest_vcpu_id;
+        const struct vcpu *vcpu;
 
         if ( !(pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) )
         {
@@ -442,22 +397,24 @@ int pt_irq_create_bind(
         dest_vcpu_id = hvm_girq_dest_2_vcpu_id(d, dest, dest_mode);
         pirq_dpci->gmsi.dest_vcpu_id = dest_vcpu_id;
         spin_unlock(&d->event_lock);
+
+        pirq_dpci->gmsi.posted = false;
+        vcpu = (dest_vcpu_id >= 0) ? d->vcpu[dest_vcpu_id] : NULL;
+        if ( iommu_intpost )
+        {
+            if ( delivery_mode == dest_LowestPrio )
+                vcpu = vector_hashing_dest(d, dest, dest_mode,
+                                           pirq_dpci->gmsi.gvec);
+            if ( vcpu )
+                pirq_dpci->gmsi.posted = true;
+        }
         if ( dest_vcpu_id >= 0 )
             hvm_migrate_pirqs(d->vcpu[dest_vcpu_id]);
 
         /* Use interrupt posting if it is supported. */
         if ( iommu_intpost )
-        {
-            const struct vcpu *vcpu = pi_find_dest_vcpu(d, dest, dest_mode,
-                                          delivery_mode, pirq_dpci->gmsi.gvec);
-
-            if ( vcpu )
-                pi_update_irte( vcpu, info, pirq_dpci->gmsi.gvec );
-            else
-                dprintk(XENLOG_G_INFO,
-                        "%pv: deliver interrupt in remapping mode,gvec:%02x\n",
-                        vcpu, pirq_dpci->gmsi.gvec);
-        }
+            pi_update_irte(vcpu ? &vcpu->arch.hvm_vmx.pi_desc : NULL,
+                           info, pirq_dpci->gmsi.gvec);
 
         break;
     }
@@ -656,6 +613,8 @@ int pt_irq_destroy_bind(
         else
             what = "bogus";
     }
+    else if ( pirq_dpci && pirq_dpci->gmsi.posted )
+        pi_update_irte(NULL, pirq, 0);
 
     if ( pirq_dpci && (pirq_dpci->flags & HVM_IRQ_DPCI_MAPPED) &&
          list_empty(&pirq_dpci->digl_list) )
@@ -788,7 +747,7 @@ static int _hvm_dpci_msi_eoi(struct domain *d,
 
 void hvm_dpci_msi_eoi(struct domain *d, int vector)
 {
-    if ( !iommu_enabled || !d->arch.hvm_domain.irq.dpci )
+    if ( !iommu_enabled || !hvm_domain_irq(d)->dpci )
        return;
 
     spin_lock(&d->event_lock);
@@ -798,7 +757,7 @@ void hvm_dpci_msi_eoi(struct domain *d, int vector)
 
 static void hvm_dirq_assist(struct domain *d, struct hvm_pirq_dpci *pirq_dpci)
 {
-    if ( unlikely(!d->arch.hvm_domain.irq.dpci) )
+    if ( unlikely(!hvm_domain_irq(d)->dpci) )
     {
         ASSERT_UNREACHABLE();
         return;

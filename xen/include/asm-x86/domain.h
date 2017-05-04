@@ -1,13 +1,13 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
-#include <xen/config.h>
 #include <xen/mm.h>
 #include <xen/radix-tree.h>
 #include <asm/hvm/vcpu.h>
 #include <asm/hvm/domain.h>
 #include <asm/e820.h>
 #include <asm/mce.h>
+#include <asm/vpmu.h>
 #include <asm/x86_emulate.h>
 #include <public/vcpu.h>
 #include <public/hvm/hvm_info_table.h>
@@ -15,10 +15,9 @@
 #define has_32bit_shinfo(d)    ((d)->arch.has_32bit_shinfo)
 #define is_pv_32bit_domain(d)  ((d)->arch.is_32bit_pv)
 #define is_pv_32bit_vcpu(v)    (is_pv_32bit_domain((v)->domain))
-#define is_pvh_32bit_domain(d) (is_pvh_domain(d) && has_32bit_shinfo(d))
 
-#define is_hvm_pv_evtchn_domain(d) (has_hvm_container_domain(d) && \
-        d->arch.hvm_domain.irq.callback_via_type == HVMIRQ_callback_vector)
+#define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
+        (d)->arch.hvm_domain.irq->callback_via_type == HVMIRQ_callback_vector)
 #define is_hvm_pv_evtchn_vcpu(v) (is_hvm_pv_evtchn_domain(v->domain))
 #define is_domain_direct_mapped(d) ((void)(d), 0)
 
@@ -175,9 +174,11 @@ struct log_dirty_domain {
     unsigned int   dirty_count;
 
     /* functions which are paging mode specific */
-    int            (*enable_log_dirty   )(struct domain *d, bool_t log_global);
-    int            (*disable_log_dirty  )(struct domain *d);
-    void           (*clean_dirty_bitmap )(struct domain *d);
+    const struct log_dirty_ops {
+        int        (*enable  )(struct domain *d, bool log_global);
+        int        (*disable )(struct domain *d);
+        void       (*clean   )(struct domain *d);
+    } *ops;
 };
 
 struct paging_domain {
@@ -194,9 +195,6 @@ struct paging_domain {
     struct hap_domain       hap;
     /* log dirty support */
     struct log_dirty_domain log_dirty;
-
-    /* Number of valid bits in a gfn. */
-    unsigned int gfn_bits;
 
     /* preemption handling */
     struct {
@@ -313,6 +311,12 @@ struct arch_domain
     } relmem;
     struct page_list_head relmem_list;
 
+    const struct arch_csw {
+        void (*from)(struct vcpu *);
+        void (*to)(struct vcpu *);
+        void (*tail)(struct vcpu *);
+    } *ctxt_switch;
+
     /* nestedhvm: translate l2 guest physical to host physical */
     struct p2m_domain *nested_p2m[MAX_NESTEDP2M];
     mm_lock_t nested_p2m_lock;
@@ -400,6 +404,7 @@ struct arch_domain
         unsigned int debug_exception_enabled     : 1;
         unsigned int debug_exception_sync        : 1;
         unsigned int cpuid_enabled               : 1;
+        unsigned int descriptor_access_enabled   : 1;
         struct monitor_msr_bitmap *msr_bitmap;
     } monitor;
 
@@ -419,6 +424,8 @@ struct arch_domain
 #define has_vvga(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VGA))
 #define has_viommu(d)      (!!((d)->arch.emulation_flags & XEN_X86_EMU_IOMMU))
 #define has_vpit(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIT))
+#define has_pirq(d)        (!!((d)->arch.emulation_flags & \
+                            XEN_X86_EMU_USE_PIRQ))
 
 #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
 
@@ -509,11 +516,6 @@ struct arch_vcpu
 
     unsigned long      flags; /* TF_ */
 
-    void (*schedule_tail) (struct vcpu *);
-
-    void (*ctxt_switch_from) (struct vcpu *);
-    void (*ctxt_switch_to) (struct vcpu *);
-
     struct vpmu_struct vpmu;
 
     /* Virtual Machine Extensions */
@@ -576,8 +578,14 @@ struct arch_vcpu
     } monitor;
 };
 
-smap_check_policy_t smap_policy_change(struct vcpu *v,
-                                       smap_check_policy_t new_policy);
+struct guest_memory_policy
+{
+    smap_check_policy_t smap_policy;
+    bool nested_guest_mode;
+};
+
+void update_guest_memory_policy(struct vcpu *v,
+                                struct guest_memory_policy *policy);
 
 /* Shorthands to improve code legibility. */
 #define hvm_vmx         hvm_vcpu.u.vmx

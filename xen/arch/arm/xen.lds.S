@@ -2,7 +2,6 @@
 /* Modified for i386/x86-64 Xen by Keir Fraser */
 /* Modified for ARM Xen by Ian Campbell */
 
-#include <xen/config.h>
 #include <xen/cache.h>
 #include <asm/page.h>
 #include <asm/percpu.h>
@@ -21,7 +20,7 @@ OUTPUT_ARCH(FORMAT)
 
 PHDRS
 {
-  text PT_LOAD /* XXX should be AT ( XEN_PHYS_START ) */ ;
+  text PT_LOAD ;
 #if defined(BUILD_ID)
   note PT_NOTE ;
 #endif
@@ -30,7 +29,7 @@ SECTIONS
 {
   . = XEN_VIRT_START;
   _start = .;
-  .text : /* XXX should be AT ( XEN_PHYS_START ) */ {
+  .text : {
         _stext = .;            /* Text section */
        *(.text)
        *(.text.cold)

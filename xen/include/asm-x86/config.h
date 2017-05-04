@@ -50,11 +50,8 @@
 #define OPT_CONSOLE_STR "vga"
 
 /* Linkage for x86 */
-#define __ALIGN .align 16,0x90
-#define __ALIGN_STR ".align 16,0x90"
 #ifdef __ASSEMBLY__
-#define ALIGN __ALIGN
-#define ALIGN_STR __ALIGN_STR
+#define ALIGN .align 16,0x90
 #define ENTRY(name)                             \
   .globl name;                                  \
   ALIGN;                                        \
@@ -72,6 +69,12 @@
 
 #define STACK_ORDER 3
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
+
+#define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
+#define TRAMPOLINE_SPACE        (KB(64) - TRAMPOLINE_STACK_SPACE)
+#define WAKEUP_STACK_MIN        3072
+
+#define MBI_SPACE_MIN           (2 * PAGE_SIZE)
 
 /* Primary stack is restricted to 8kB by guard pages. */
 #define PRIMARY_STACK_SIZE 8192

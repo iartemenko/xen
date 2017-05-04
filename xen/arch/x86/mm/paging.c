@@ -50,8 +50,6 @@ DEFINE_PER_CPU(int, mm_lock_level);
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef mfn_to_page
 #define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef mfn_valid
-#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
 #undef page_to_mfn
 #define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
 
@@ -234,7 +232,7 @@ int paging_log_dirty_enable(struct domain *d, bool_t log_global)
         return -EINVAL;
 
     domain_pause(d);
-    ret = d->arch.paging.log_dirty.enable_log_dirty(d, log_global);
+    ret = d->arch.paging.log_dirty.ops->enable(d, log_global);
     domain_unpause(d);
 
     return ret;
@@ -250,7 +248,7 @@ static int paging_log_dirty_disable(struct domain *d, bool_t resuming)
         /* Safe because the domain is paused. */
         if ( paging_mode_log_dirty(d) )
         {
-            ret = d->arch.paging.log_dirty.disable_log_dirty(d);
+            ret = d->arch.paging.log_dirty.ops->disable(d);
             ASSERT(ret <= 0);
         }
     }
@@ -422,7 +420,7 @@ static int paging_log_dirty_op(struct domain *d,
          * Mark dirty all currently write-mapped pages on e.g. the
          * final iteration of a save operation.
          */
-        if ( has_hvm_container_domain(d) &&
+        if ( is_hvm_domain(d) &&
              (sc->mode & XEN_DOMCTL_SHADOW_LOGDIRTY_FINAL) )
             hvm_mapped_guest_frames_mark_dirty(d);
 
@@ -572,7 +570,7 @@ static int paging_log_dirty_op(struct domain *d,
     {
         /* We need to further call clean_dirty_bitmap() functions of specific
          * paging modes (shadow or hap).  Safe because the domain is paused. */
-        d->arch.paging.log_dirty.clean_dirty_bitmap(d);
+        d->arch.paging.log_dirty.ops->clean(d);
     }
     domain_unpause(d);
     return rv;
@@ -624,22 +622,16 @@ void paging_log_dirty_range(struct domain *d,
     flush_tlb_mask(d->domain_dirty_cpumask);
 }
 
-/* Note that this function takes three function pointers. Callers must supply
- * these functions for log dirty code to call. This function usually is
- * invoked when paging is enabled. Check shadow_enable() and hap_enable() for
- * reference.
+/*
+ * Callers must supply log_dirty_ops for the log dirty code to call. This
+ * function usually is invoked when paging is enabled. Check shadow_enable()
+ * and hap_enable() for reference.
  *
  * These function pointers must not be followed with the log-dirty lock held.
  */
-void paging_log_dirty_init(struct domain *d,
-                           int    (*enable_log_dirty)(struct domain *d,
-                                                      bool_t log_global),
-                           int    (*disable_log_dirty)(struct domain *d),
-                           void   (*clean_dirty_bitmap)(struct domain *d))
+void paging_log_dirty_init(struct domain *d, const struct log_dirty_ops *ops)
 {
-    d->arch.paging.log_dirty.enable_log_dirty = enable_log_dirty;
-    d->arch.paging.log_dirty.disable_log_dirty = disable_log_dirty;
-    d->arch.paging.log_dirty.clean_dirty_bitmap = clean_dirty_bitmap;
+    d->arch.paging.log_dirty.ops = ops;
 }
 
 /************************************************/

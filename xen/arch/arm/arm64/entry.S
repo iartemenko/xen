@@ -1,6 +1,6 @@
-#include <xen/config.h>
 #include <asm/asm_defns.h>
 #include <asm/regs.h>
+#include <asm/alternative.h>
 #include <public/xen.h>
 
 /*
@@ -122,9 +122,13 @@ lr      .req    x30             // link register
 
         stp     lr, x21, [sp, #UREGS_LR]
 
-        mrs     x22, elr_el2
-        mrs     x23, spsr_el2
-        stp     x22, x23, [sp, #UREGS_PC]
+        mrs     x21, elr_el2
+        str     x21, [sp, #UREGS_PC]
+
+        add     x21, sp, #UREGS_CPSR
+        mrs     x22, spsr_el2
+        mrs     x23, esr_el2
+        stp     w22, w23, [x21]
 
         .endm
 
@@ -174,65 +178,38 @@ hyp_error_invalid:
         invalid BAD_ERROR
 
 hyp_error:
-        /*
-         * Only two possibilities:
-         * 1) Either we come from the exit path, having just unmasked
-         *    PSTATE.A: change the return code to an EL2 fault, and
-         *    carry on, as we're already in a sane state to handle it.
-         * 2) Or we come from anywhere else, and that's a bug: we panic.
-         */
         entry   hyp=1
         msr     daifclr, #2
-
-        /*
-         * The ELR_EL2 may be modified by an interrupt, so we have to use the
-         * saved value in cpu_user_regs to check whether we come from 1) or
-         * not.
-         */
-        ldr     x0, [sp, #UREGS_PC]
-        adr     x1, abort_guest_exit_start
-        cmp     x0, x1
-        adr     x1, abort_guest_exit_end
-        ccmp    x0, x1, #4, ne
         mov     x0, sp
-        mov     x1, #BAD_ERROR
-
-        /*
-         * Not equal, the exception come from 2). It's a bug, we have to
-         * panic the hypervisor.
-         */
-        b.ne    do_bad_mode
-
-        /*
-         * Otherwise, the exception come from 1). It happened because of
-         * the guest. Crash this guest.
-         */
-        bl      do_trap_guest_error
+        bl      do_trap_hyp_serror
         exit    hyp=1
 
 /* Traps taken in Current EL with SP_ELx */
 hyp_sync:
         entry   hyp=1
-        msr     daifclr, #2
+        msr     daifclr, #6
         mov     x0, sp
         bl      do_trap_hypervisor
         exit    hyp=1
 
 hyp_irq:
         entry   hyp=1
+        msr     daifclr, #4
         mov     x0, sp
         bl      do_trap_irq
         exit    hyp=1
 
 guest_sync:
         entry   hyp=0, compat=0
-        bl      check_pending_vserror
         /*
-         * If x0 is Non-zero, a vSError took place, the initial exception
-         * doesn't have any significance to be handled. Exit ASAP
+         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
+         * is not set. If a vSError took place, the initial exception will be
+         * skipped. Exit ASAP
          */
-        cbnz    x0, 1f
-        msr     daifclr, #2
+        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
+                    "nop; nop",
+                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
+        msr     daifclr, #6
         mov     x0, sp
         bl      do_trap_hypervisor
 1:
@@ -240,12 +217,15 @@ guest_sync:
 
 guest_irq:
         entry   hyp=0, compat=0
-        bl      check_pending_vserror
         /*
-         * If x0 is Non-zero, a vSError took place, the initial exception
-         * doesn't have any significance to be handled. Exit ASAP
+         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
+         * is not set. If a vSError took place, the initial exception will be
+         * skipped. Exit ASAP
          */
-        cbnz    x0, 1f
+        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
+                    "nop; nop",
+                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
+        msr     daifclr, #4
         mov     x0, sp
         bl      do_trap_irq
 1:
@@ -257,20 +237,22 @@ guest_fiq_invalid:
 
 guest_error:
         entry   hyp=0, compat=0
-        msr     daifclr, #2
+        msr     daifclr, #6
         mov     x0, sp
-        bl      do_trap_guest_error
+        bl      do_trap_guest_serror
         exit    hyp=0, compat=0
 
 guest_sync_compat:
         entry   hyp=0, compat=1
-        bl      check_pending_vserror
         /*
-         * If x0 is Non-zero, a vSError took place, the initial exception
-         * doesn't have any significance to be handled. Exit ASAP
+         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
+         * is not set. If a vSError took place, the initial exception will be
+         * skipped. Exit ASAP
          */
-        cbnz    x0, 1f
-        msr     daifclr, #2
+        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
+                    "nop; nop",
+                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
+        msr     daifclr, #6
         mov     x0, sp
         bl      do_trap_hypervisor
 1:
@@ -278,12 +260,15 @@ guest_sync_compat:
 
 guest_irq_compat:
         entry   hyp=0, compat=1
-        bl      check_pending_vserror
         /*
-         * If x0 is Non-zero, a vSError took place, the initial exception
-         * doesn't have any significance to be handled. Exit ASAP
+         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
+         * is not set. If a vSError took place, the initial exception will be
+         * skipped. Exit ASAP
          */
-        cbnz    x0, 1f
+        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
+                    "nop; nop",
+                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
+        msr     daifclr, #4
         mov     x0, sp
         bl      do_trap_irq
 1:
@@ -295,9 +280,9 @@ guest_fiq_invalid_compat:
 
 guest_error_compat:
         entry   hyp=0, compat=1
-        msr     daifclr, #2
+        msr     daifclr, #6
         mov     x0, sp
-        bl      do_trap_guest_error
+        bl      do_trap_guest_serror
         exit    hyp=0, compat=1
 
 ENTRY(return_to_new_vcpu32)
@@ -308,7 +293,8 @@ ENTRY(return_to_new_vcpu64)
 return_from_trap:
         msr     daifset, #2 /* Mask interrupts */
 
-        ldp     x21, x22, [sp, #UREGS_PC]       // load ELR, SPSR
+        ldr     x21, [sp, #UREGS_PC]            // load ELR
+        ldr     w22, [sp, #UREGS_CPSR]          // load SPSR
 
         pop     x0, x1
         pop     x2, x3
@@ -367,10 +353,12 @@ check_pending_vserror:
          * exception handler, and the elr_el2 will be set to
          * abort_guest_exit_start or abort_guest_exit_end.
          */
+        .global abort_guest_exit_start
 abort_guest_exit_start:
 
         isb
 
+        .global abort_guest_exit_end
 abort_guest_exit_end:
         /* Mask PSTATE asynchronous abort bit, close the checking window. */
         msr     daifset, #4

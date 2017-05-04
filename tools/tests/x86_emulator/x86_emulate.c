@@ -2,9 +2,6 @@
 
 #include <sys/mman.h>
 
-#define EFER_SCE       (1 << 0)
-#define EFER_LMA       (1 << 10)
-
 #define cpu_has_amd_erratum(nr) 0
 #define mark_regs_dirty(r) ((void)(r))
 #define cpu_has_mpx false
@@ -22,12 +19,34 @@
 # define __OP          "r"  /* Operand Prefix */
 #endif
 
-#define get_stub(stb) ((void *)((stb).addr = (uintptr_t)(stb).buf))
-#define put_stub(stb)
+#define get_stub(stb) ({                         \
+    assert(!(stb).addr);                         \
+    (void *)((stb).addr = (uintptr_t)(stb).buf); \
+})
+#define put_stub(stb) ((stb).addr = 0)
 
-bool emul_test_make_stack_executable(void)
+uint32_t mxcsr_mask = 0x0000ffbf;
+
+bool emul_test_init(void)
 {
     unsigned long sp;
+
+    if ( cpu_has_fxsr )
+    {
+        static union __attribute__((__aligned__(16))) {
+            char x[464];
+            struct {
+                uint32_t other[6];
+                uint32_t mxcsr;
+                uint32_t mxcsr_mask;
+                /* ... */
+            };
+        } fxs;
+
+        asm ( "fxsave %0" : "=m" (fxs) );
+        if ( fxs.mxcsr_mask )
+            mxcsr_mask = fxs.mxcsr_mask;
+    }
 
     /*
      * Mark the entire stack executable so that the stub executions
@@ -69,6 +88,13 @@ int emul_test_cpuid(
         res->b |= 1U << 19;
         res->c |= 1U << 22;
     }
+
+    /*
+     * The emulator doesn't itself use CLZERO, so we can always run the
+     * respective test(s).
+     */
+    if ( leaf == 0x80000008 )
+        res->b |= 1U << 0;
 
     return X86EMUL_OKAY;
 }
@@ -117,6 +143,14 @@ int emul_test_get_fpu(
         return X86EMUL_UNHANDLEABLE;
     }
     return X86EMUL_OKAY;
+}
+
+void emul_test_put_fpu(
+    struct x86_emulate_ctxt *ctxt,
+    enum x86_emulate_fpu_type backout,
+    const struct x86_emul_fpu_aux *aux)
+{
+    /* TBD */
 }
 
 #include "x86_emulate/x86_emulate.c"

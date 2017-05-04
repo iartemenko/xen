@@ -21,8 +21,6 @@ hotplug/Linux/xen-hotplug-common.sh
 hotplug/Linux/xendomains
 hotplug/NetBSD/rc.d/xencommons
 hotplug/NetBSD/rc.d/xendriverdomain
-libxl/xenlight.pc.in
-libxl/xlutil.pc.in
 ocaml/xenstored/oxenstored.conf
 ])
 AC_CONFIG_HEADERS([config.h])
@@ -295,9 +293,9 @@ AC_PROG_OCAML
 AC_PROG_FINDLIB
 
 AS_IF([test "x$ocamltools" = "xy"], [
-    AS_IF([test "x$OCAMLC" = "xno" || test "x$OCAMLFIND" = "xno"], [
+    AS_IF([test "x$OCAMLOPT" = "xno" || test "x$OCAMLFIND" = "xno"], [
         AS_IF([test "x$enable_ocamltools" = "xyes"], [
-            AC_MSG_ERROR([Ocaml tools enabled, but unable to find Ocaml])])
+            AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
         AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [3.09.3], [
@@ -320,7 +318,11 @@ AS_IF([test "x$xsmpolicy" = "xy"], [
         xsmpolicy="n"
     ])
 ])
-AX_PATH_PROG_OR_FAIL([BASH], [bash])
+dnl FreeBSD doesn't require bash (hotplug scripts are in plain sh)
+case "$host_os" in
+  freebsd*) ;;
+  *) AX_PATH_PROG_OR_FAIL([BASH], [bash]);;
+esac
 AS_IF([echo "$PYTHON" | grep -q "^/"], [
     PYTHONPATH=$PYTHON
     PYTHON=`basename $PYTHONPATH`

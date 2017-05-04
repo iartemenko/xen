@@ -120,7 +120,7 @@ wakeup_32:
         mov     $bootsym_rel(wakeup_stack, 4, %esp)
 
         # check saved magic again
-        mov     $sym_phys(saved_magic), %eax
+        mov     $sym_offs(saved_magic),%eax
         add     bootsym_rel(trampoline_xen_phys_start, 4, %eax)
         mov     (%eax), %eax
         cmp     $0x9abcdef0, %eax
@@ -133,7 +133,7 @@ wakeup_32:
         mov     %ecx, %cr4
 
         /* Load pagetable base register */
-        mov     $sym_phys(idle_pg_table),%eax
+        mov     $sym_offs(idle_pg_table),%eax
         add     bootsym_rel(trampoline_xen_phys_start,4,%eax)
         mov     %eax,%cr3
 
@@ -173,6 +173,5 @@ bogus_saved_magic:
         movw    $0x0e00 + 'S', 0xb8014
         jmp     bogus_saved_magic
 
-        .align  16
-        .fill   PAGE_SIZE,1,0
-wakeup_stack:
+/* Stack for wakeup: rest of first trampoline page. */
+ENTRY(wakeup_stack_start)

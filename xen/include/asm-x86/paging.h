@@ -150,11 +150,7 @@ void paging_log_dirty_range(struct domain *d,
 int paging_log_dirty_enable(struct domain *d, bool_t log_global);
 
 /* log dirty initialization */
-void paging_log_dirty_init(struct domain *d,
-                           int  (*enable_log_dirty)(struct domain *d,
-                                                    bool_t log_global),
-                           int  (*disable_log_dirty)(struct domain *d),
-                           void (*clean_dirty_bitmap)(struct domain *d));
+void paging_log_dirty_init(struct domain *d, const struct log_dirty_ops *ops);
 
 /* mark a page as dirty */
 void paging_mark_dirty(struct domain *d, mfn_t gmfn);
@@ -246,12 +242,13 @@ paging_fault(unsigned long va, struct cpu_user_regs *regs)
 /* Handle invlpg requests on vcpus. */
 void paging_invlpg(struct vcpu *v, unsigned long va);
 
-/* Translate a guest virtual address to the frame number that the
+/*
+ * Translate a guest virtual address to the frame number that the
  * *guest* pagetables would map it to.  Returns INVALID_GFN if the guest
  * tables don't map this address for this kind of access.
- * pfec[0] is used to determine which kind of access this is when
+ * *pfec is used to determine which kind of access this is when
  * walking the tables.  The caller should set the PFEC_page_present bit
- * in pfec[0]; in the failure case, that bit will be cleared if appropriate.
+ * in *pfec; in the failure case, that bit will be cleared if appropriate.
  *
  * SDM Intel 64 Volume 3, Chapter Paging, PAGE-FAULT EXCEPTIONS:
  * The PFEC_insn_fetch flag is set only when NX or SMEP are enabled.
@@ -359,6 +356,27 @@ void paging_dump_vcpu_info(struct vcpu *v);
  * Returns 0 for success, non-zero for failure. */
 int paging_set_allocation(struct domain *d, unsigned int pages,
                           bool *preempted);
+
+/* Is gfn within maxphysaddr for the domain? */
+static inline bool gfn_valid(const struct domain *d, gfn_t gfn)
+{
+    return !(gfn_x(gfn) >> (d->arch.cpuid->extd.maxphysaddr - PAGE_SHIFT));
+}
+
+/* Maxphysaddr supportable by the paging infrastructure. */
+static inline unsigned int paging_max_paddr_bits(const struct domain *d)
+{
+    unsigned int bits = paging_mode_hap(d) ? hap_paddr_bits : paddr_bits;
+
+    if ( !IS_ENABLED(BIGMEM) && paging_mode_shadow(d) &&
+         (!is_pv_domain(d) || opt_allow_superpage) )
+    {
+        /* Shadowed superpages store GFNs in 32-bit page_info fields. */
+        bits = min(bits, 32U + PAGE_SHIFT);
+    }
+
+    return bits;
+}
 
 #endif /* XEN_PAGING_H */
 

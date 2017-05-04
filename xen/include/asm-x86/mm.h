@@ -2,7 +2,6 @@
 #ifndef __ASM_X86_MM_H__
 #define __ASM_X86_MM_H__
 
-#include <xen/config.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
 #include <xen/rwlock.h>
@@ -253,8 +252,8 @@ struct spage_info
 #define is_xen_heap_mfn(mfn) \
     (__mfn_valid(mfn) && is_xen_heap_page(__mfn_to_page(mfn)))
 #define is_xen_fixed_mfn(mfn)                     \
-    ((((mfn) << PAGE_SHIFT) >= __pa(&_start)) &&  \
-     (((mfn) << PAGE_SHIFT) <= __pa(&_end)))
+    ((((mfn) << PAGE_SHIFT) >= __pa(&_stext)) &&  \
+     (((mfn) << PAGE_SHIFT) <= __pa(&__2M_rwdata_end)))
 
 #define PRtype_info "016lx"/* should only be used for printk's */
 
@@ -276,6 +275,8 @@ struct spage_info
 #define XENSHARE_readonly 1
 extern void share_xen_page_with_guest(
     struct page_info *page, struct domain *d, int readonly);
+extern int unshare_xen_page_with_guest(struct page_info *page,
+                                       struct domain *d);
 extern void share_xen_page_with_privileged_guests(
     struct page_info *page, int readonly);
 extern void free_shared_domheap_page(struct page_info *page);
@@ -326,7 +327,7 @@ void init_guest_l4_table(l4_pgentry_t[], const struct domain *,
 bool_t fill_ro_mpt(unsigned long mfn);
 void zap_ro_mpt(unsigned long mfn);
 
-int is_iomem_page(unsigned long mfn);
+bool is_iomem_page(mfn_t mfn);
 
 void clear_superpage_mark(struct page_info *page);
 
@@ -597,5 +598,19 @@ typedef struct mm_rwlock {
                    &(d)->arch.relmem_list)
 
 extern const char zero_page[];
+
+/* Build a 32bit PSE page table using 4MB pages. */
+void write_32bit_pse_identmap(uint32_t *l2);
+
+/*
+ * x86 maps part of physical memory via the directmap region.
+ * Return whether the input MFN falls in that range.
+ */
+static inline bool arch_mfn_in_directmap(unsigned long mfn)
+{
+    unsigned long eva = min(DIRECTMAP_VIRT_END, HYPERVISOR_VIRT_END);
+
+    return mfn <= (virt_to_mfn(eva - 1) + 1);
+}
 
 #endif /* __ASM_X86_MM_H__ */

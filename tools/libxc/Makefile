@@ -50,6 +50,7 @@ CTRL_SRCS-$(CONFIG_NetBSDRump) += xc_netbsd.c
 CTRL_SRCS-$(CONFIG_MiniOS) += xc_minios.c
 CTRL_SRCS-y       += xc_evtchn_compat.c
 CTRL_SRCS-y       += xc_gnttab_compat.c
+CTRL_SRCS-y       += xc_devicemodel_compat.c
 
 GUEST_SRCS-y :=
 GUEST_SRCS-y += xg_private.c xc_suspend.c
@@ -113,6 +114,7 @@ CFLAGS-$(CONFIG_Linux) += -D_GNU_SOURCE
 CFLAGS	+= $(PTHREAD_CFLAGS)
 CFLAGS	+= $(CFLAGS_libxentoollog)
 CFLAGS	+= $(CFLAGS_libxenevtchn)
+CFLAGS	+= $(CFLAGS_libxendevicemodel)
 
 CTRL_LIB_OBJS := $(patsubst %.c,%.o,$(CTRL_SRCS-y))
 CTRL_PIC_OBJS := $(patsubst %.c,%.opic,$(CTRL_SRCS-y))
@@ -128,7 +130,7 @@ $(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): CFLAGS += -include $(XEN_ROOT)/tools/config.
 $(CTRL_LIB_OBJS) $(GUEST_LIB_OBJS) \
 $(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): CFLAGS += $(CFLAGS_libxencall) $(CFLAGS_libxenforeignmemory)
 
-$(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS): CFLAGS += $(CFLAGS_libxengnttab) $(CFLAGS_libxengntshr)
+$(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS): CFLAGS += $(CFLAGS_libxengnttab)
 
 LIB := libxenctrl.a
 ifneq ($(nosharedlibs),y)
@@ -157,6 +159,23 @@ endif
 $(CTRL_LIB_OBJS) $(GUEST_LIB_OBJS) \
 $(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): xc_private.h
 
+PKG_CONFIG := xencontrol.pc xenguest.pc
+PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
+
+ifneq ($(CONFIG_LIBXC_MINIOS),y)
+PKG_CONFIG_INST := $(PKG_CONFIG)
+$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
+$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
+$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
+endif
+
+PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
+
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(XEN_LIBXC)/include
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_CFLAGS_LOCAL = $(CFLAGS_xeninclude)
+
 .PHONY: all
 all: build
 
@@ -165,7 +184,7 @@ build:
 	$(MAKE) libs
 
 .PHONY: libs
-libs: $(LIB)
+libs: $(LIB) $(PKG_CONFIG_INST) $(PKG_CONFIG_LOCAL)
 
 .PHONY: install
 install: build
@@ -181,6 +200,8 @@ install: build
 	$(SYMLINK_SHLIB) libxenguest.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR)
 	$(SYMLINK_SHLIB) libxenguest.so.$(MAJOR) $(DESTDIR)$(libdir)/libxenguest.so
 	$(INSTALL_DATA) include/xenguest.h $(DESTDIR)$(includedir)
+	$(INSTALL_DATA) xencontrol.pc $(DESTDIR)$(PKG_INSTALLDIR)
+	$(INSTALL_DATA) xenguest.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
 .PHONY: TAGS
 TAGS:
@@ -190,6 +211,7 @@ TAGS:
 clean:
 	rm -rf *.rpm $(LIB) *~ $(DEPS) \
             _paths.h \
+	    xencontrol.pc xenguest.pc \
             $(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS) \
             $(GUEST_LIB_OBJS) $(GUEST_PIC_OBJS)
 
@@ -217,7 +239,7 @@ libxenctrl.so.$(MAJOR): libxenctrl.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxenctrl.so.$(MAJOR).$(MINOR): $(CTRL_PIC_OBJS)
-	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenctrl.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxengntshr) $(LDLIBS_libxencall) $(LDLIBS_libxenforeignmemory) $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenctrl.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxencall) $(LDLIBS_libxenforeignmemory) $(LDLIBS_libxendevicemodel) $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
 
 # libxenguest
 

@@ -18,7 +18,6 @@
  */
 
 #include <xen/bitops.h>
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/softirq.h>
@@ -85,7 +84,7 @@ static void vgic_rank_init(struct vgic_irq_rank *rank, uint8_t index,
     rank->index = index;
 
     for ( i = 0; i < NR_INTERRUPT_PER_RANK; i++ )
-        rank->vcpu[i] = vcpu;
+        write_atomic(&rank->vcpu[i], vcpu);
 }
 
 int domain_vgic_register(struct domain *d, int *mmio_count)
@@ -218,28 +217,11 @@ int vcpu_vgic_free(struct vcpu *v)
     return 0;
 }
 
-/* The function should be called by rank lock taken. */
-static struct vcpu *__vgic_get_target_vcpu(struct vcpu *v, unsigned int virq)
-{
-    struct vgic_irq_rank *rank = vgic_rank_irq(v, virq);
-
-    ASSERT(spin_is_locked(&rank->lock));
-
-    return v->domain->vcpu[rank->vcpu[virq & INTERRUPT_RANK_MASK]];
-}
-
-/* takes the rank lock */
 struct vcpu *vgic_get_target_vcpu(struct vcpu *v, unsigned int virq)
 {
-    struct vcpu *v_target;
     struct vgic_irq_rank *rank = vgic_rank_irq(v, virq);
-    unsigned long flags;
-
-    vgic_lock_rank(v, rank, flags);
-    v_target = __vgic_get_target_vcpu(v, virq);
-    vgic_unlock_rank(v, rank, flags);
-
-    return v_target;
+    int target = read_atomic(&rank->vcpu[virq & INTERRUPT_RANK_MASK]);
+    return v->domain->vcpu[target];
 }
 
 static int vgic_get_virq_priority(struct vcpu *v, unsigned int virq)
@@ -255,18 +237,21 @@ static int vgic_get_virq_priority(struct vcpu *v, unsigned int virq)
     return priority;
 }
 
-void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
+bool vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
 {
     unsigned long flags;
     struct pending_irq *p = irq_to_pending(old, irq);
 
     /* nothing to do for virtual interrupts */
     if ( p->desc == NULL )
-        return;
+        return true;
 
     /* migration already in progress, no need to do anything */
     if ( test_bit(GIC_IRQ_GUEST_MIGRATING, &p->status) )
-        return;
+    {
+        gprintk(XENLOG_WARNING, "irq %u migration failed: requested while in progress\n", irq);
+        return false;
+    }
 
     perfc_incr(vgic_irq_migrates);
 
@@ -276,7 +261,7 @@ void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
     {
         irq_set_affinity(p->desc, cpumask_of(new->processor));
         spin_unlock_irqrestore(&old->arch.vgic.lock, flags);
-        return;
+        return true;
     }
     /* If the IRQ is still lr_pending, re-inject it to the new vcpu */
     if ( !list_empty(&p->lr_queue) )
@@ -287,7 +272,7 @@ void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
         irq_set_affinity(p->desc, cpumask_of(new->processor));
         spin_unlock_irqrestore(&old->arch.vgic.lock, flags);
         vgic_vcpu_inject_irq(new, irq);
-        return;
+        return true;
     }
     /* if the IRQ is in a GICH_LR register, set GIC_IRQ_GUEST_MIGRATING
      * and wait for the EOI */
@@ -295,6 +280,7 @@ void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
         set_bit(GIC_IRQ_GUEST_MIGRATING, &p->status);
 
     spin_unlock_irqrestore(&old->arch.vgic.lock, flags);
+    return true;
 }
 
 void arch_move_irqs(struct vcpu *v)
@@ -326,7 +312,7 @@ void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
         irq = i + (32 * n);
-        v_target = __vgic_get_target_vcpu(v, irq);
+        v_target = vgic_get_target_vcpu(v, irq);
         p = irq_to_pending(v_target, irq);
         clear_bit(GIC_IRQ_GUEST_ENABLED, &p->status);
         gic_remove_from_queues(v_target, irq);
@@ -368,7 +354,7 @@ void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
         irq = i + (32 * n);
-        v_target = __vgic_get_target_vcpu(v, irq);
+        v_target = vgic_get_target_vcpu(v, irq);
         p = irq_to_pending(v_target, irq);
         set_bit(GIC_IRQ_GUEST_ENABLED, &p->status);
         spin_lock_irqsave(&v_target->arch.vgic.lock, flags);

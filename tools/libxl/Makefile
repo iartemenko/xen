@@ -136,7 +136,9 @@ LIBXL_OBJS = flexarray.o libxl.o libxl_create.o libxl_dm.o libxl_pci.o \
 			libxl_save_callout.o _libxl_save_msgs_callout.o \
 			libxl_qmp.o libxl_event.o libxl_fork.o \
 			libxl_dom_suspend.o libxl_dom_save.o libxl_usb.o \
-			libxl_vtpm.o libxl_nic.o \
+			libxl_vtpm.o libxl_nic.o libxl_disk.o libxl_console.o \
+			libxl_cpupool.o libxl_mem.o libxl_sched.o libxl_tmem.o \
+			libxl_9pfs.o libxl_domain.o \
                         $(LIBXL_OBJS-y)
 LIBXL_OBJS += libxl_genid.o
 LIBXL_OBJS += _libxl_types.o libxl_flask.o _libxl_types_internal.o
@@ -176,16 +178,9 @@ LIBXLU_OBJS = libxlu_cfg_y.o libxlu_cfg_l.o libxlu_cfg.o \
 	libxlu_disk_l.o libxlu_disk.o libxlu_vif.o libxlu_pci.o
 $(LIBXLU_OBJS): CFLAGS += $(CFLAGS_libxenctrl) # For xentoollog.h
 
-CLIENTS = xl testidl libxl-save-helper
+$(TEST_PROG_OBJS) _libxl.api-for-check: CFLAGS += $(CFLAGS_libxentoollog)
 
-CFLAGS_XL += $(CFLAGS_libxenlight)
-CFLAGS_XL += -Wshadow
-
-XL_OBJS = xl.o xl_cmdimpl.o xl_cmdtable.o xl_sxp.o
-$(XL_OBJS) $(TEST_PROG_OBJS) _libxl.api-for-check: \
-            CFLAGS += $(CFLAGS_libxentoollog)
-$(XL_OBJS): CFLAGS += $(CFLAGS_XL)
-$(XL_OBJS): CFLAGS += -include $(XEN_ROOT)/tools/config.h # libxl_json.h needs it.
+CLIENTS = testidl libxl-save-helper
 
 libxl_dom.o: CFLAGS += -I$(XEN_ROOT)/tools  # include libacpi/x86.h
 libxl_x86_acpi.o: CFLAGS += -I$(XEN_ROOT)/tools
@@ -194,6 +189,25 @@ SAVE_HELPER_OBJS = libxl_save_helper.o _libxl_save_msgs_helper.o
 $(SAVE_HELPER_OBJS): CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_libxenevtchn)
 
 PKG_CONFIG = xenlight.pc xlutil.pc
+PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
+
+ifneq ($(CONFIG_LIBXC_MINIOS),y)
+PKG_CONFIG_INST := $(PKG_CONFIG)
+xenlight.pc: PKG_CONFIG_VERSION = $(MAJOR).$(MINOR)
+xlutil.pc: PKG_CONFIG_VERSION = $(XLUMAJOR).$(XLUMINOR)
+$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
+$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
+$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
+endif
+
+PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
+
+$(PKG_CONFIG_DIR)/xenlight.pc: PKG_CONFIG_VERSION = $(MAJOR).$(MINOR)
+$(PKG_CONFIG_DIR)/xlutil.pc: PKG_CONFIG_VERSION = $(XLUMAJOR).$(XLUMINOR)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(CURDIR)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_CFLAGS_LOCAL = $(CFLAGS_xeninclude)
 
 testidl.o: CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_libxenlight)
 testidl.c: libxl_types.idl gentest.py libxl.h $(AUTOINCS)
@@ -201,11 +215,11 @@ testidl.c: libxl_types.idl gentest.py libxl.h $(AUTOINCS)
 	mv testidl.c.new testidl.c
 
 .PHONY: all
-all: $(CLIENTS) $(TEST_PROGS) $(PKG_CONFIG) \
+all: $(CLIENTS) $(TEST_PROGS) $(PKG_CONFIG) $(PKG_CONFIG_LOCAL) \
 		libxenlight.so libxenlight.a libxlutil.so libxlutil.a \
 	$(AUTOSRCS) $(AUTOINCS)
 
-$(LIBXL_OBJS) $(LIBXLU_OBJS) $(XL_OBJS) $(SAVE_HELPER_OBJS) \
+$(LIBXL_OBJS) $(LIBXLU_OBJS) $(SAVE_HELPER_OBJS) \
 		$(LIBXL_TEST_OBJS) $(TEST_PROG_OBJS): \
 	$(AUTOINCS) libxl.api-ok
 
@@ -247,7 +261,7 @@ libxl_internal_json.h: _libxl_types_internal_json.h
 xl.h: _paths.h
 
 $(LIBXL_OBJS) $(LIBXL_TEST_OBJS) $(LIBXLU_OBJS) \
-	$(XL_OBJS) $(TEST_PROG_OBJS) $(SAVE_HELPER_OBJS): libxl.h
+	$(TEST_PROG_OBJS) $(SAVE_HELPER_OBJS): libxl.h
 $(LIBXL_OBJS) $(LIBXL_TEST_OBJS): libxl_internal.h
 
 _libxl_type%.h _libxl_type%_json.h _libxl_type%_private.h _libxl_type%.c: libxl_type%.idl gentypes.py idl.py
@@ -286,9 +300,6 @@ libxlutil.so.$(XLUMAJOR).$(XLUMINOR): $(LIBXLU_OBJS) libxenlight.so
 libxlutil.a: $(LIBXLU_OBJS)
 	$(AR) rcs libxlutil.a $^
 
-xl: $(XL_OBJS) libxlutil.so libxenlight.so
-	$(CC) $(LDFLAGS) -o $@ $(XL_OBJS) libxlutil.so $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) -lyajl $(APPEND_LDFLAGS)
-
 test_%: test_%.o test_common.o libxlutil.so libxenlight_test.so
 	$(CC) $(LDFLAGS) -o $@ $^ $(filter-out %libxenlight.so, $(LDLIBS_libxenlight)) $(LDLIBS_libxentoollog) -lyajl $(APPEND_LDFLAGS)
 
@@ -298,19 +309,11 @@ libxl-save-helper: $(SAVE_HELPER_OBJS) libxenlight.so
 testidl: testidl.o libxlutil.so libxenlight.so
 	$(CC) $(LDFLAGS) -o $@ testidl.o libxlutil.so $(LDLIBS_libxenlight) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
 
-$(PKG_CONFIG): % : %.in Makefile
-	@sed -e 's/@@version@@/$(MAJOR).$(MINOR)/g' < $< > $@.new
-	@mv -f $@.new $@
-
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_DIR) $(DESTDIR)$(libdir)
 	$(INSTALL_DIR) $(DESTDIR)$(includedir)
-	$(INSTALL_DIR) $(DESTDIR)$(BASH_COMPLETION_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_DIR) $(DESTDIR)$(PKG_INSTALLDIR)
-	$(INSTALL_PROG) xl $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) libxl-save-helper $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_SHLIB) libxenlight.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
 	$(SYMLINK_SHLIB) libxenlight.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenlight.so.$(MAJOR)
@@ -321,7 +324,6 @@ install: all
 	$(SYMLINK_SHLIB) libxlutil.so.$(XLUMAJOR) $(DESTDIR)$(libdir)/libxlutil.so
 	$(INSTALL_DATA) libxlutil.a $(DESTDIR)$(libdir)
 	$(INSTALL_DATA) libxl.h libxl_event.h libxl_json.h _libxl_types.h _libxl_types_json.h _libxl_list.h libxl_utils.h libxl_uuid.h libxlutil.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) bash-completion $(DESTDIR)$(BASH_COMPLETION_DIR)/xl.sh
 	$(INSTALL_DATA) xenlight.pc $(DESTDIR)$(PKG_INSTALLDIR)
 	$(INSTALL_DATA) xlutil.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
@@ -335,7 +337,6 @@ clean:
 	$(MAKE) -C $(ACPI_PATH) ACPI_BUILD_DIR=$(CURDIR) clean
 
 distclean: clean
-	$(RM) -f xenlight.pc.in xlutil.pc.in
 
 realclean: distclean
 	$(RM) -f $(AUTOSRCS) $(AUTOINCS)

@@ -18,7 +18,6 @@
 #ifndef __ASM_X86_HVM_VMX_VMCS_H__
 #define __ASM_X86_HVM_VMX_VMCS_H__
 
-#include <asm/vpmu.h>
 #include <asm/hvm/io.h>
 #include <irq_vectors.h>
 
@@ -28,7 +27,6 @@ extern int  vmx_cpu_up_prepare(unsigned int cpu);
 extern void vmx_cpu_dead(unsigned int cpu);
 extern int  vmx_cpu_up(void);
 extern void vmx_cpu_down(void);
-extern void vmx_save_host_msrs(void);
 
 struct vmcs_struct {
     u32 vmcs_revision_id;
@@ -41,29 +39,16 @@ struct vmx_msr_entry {
     u64 data;
 };
 
-enum {
-    VMX_INDEX_MSR_LSTAR = 0,
-    VMX_INDEX_MSR_STAR,
-    VMX_INDEX_MSR_SYSCALL_MASK,
-
-    VMX_MSR_COUNT
-};
-
-struct vmx_msr_state {
-    unsigned long flags;
-    unsigned long msrs[VMX_MSR_COUNT];
-};
-
 #define EPT_DEFAULT_MT      MTRR_TYPE_WRBACK
 
 struct ept_data {
     union {
-    struct {
-            u64 ept_mt :3,
-                ept_wl :3,
-                ept_ad :1,  /* bit 6 - enable EPT A/D bits */
-                rsvd   :5,
-                asr    :52;
+        struct {
+            uint64_t mt:3,   /* Memory Type. */
+                     wl:3,   /* Walk length -1. */
+                     ad:1,   /* Enable EPT A/D bits. */
+                     :5,     /* rsvd. */
+                     mfn:52;
         };
         u64 eptp;
     };
@@ -95,10 +80,6 @@ struct pi_desc {
     u32 rsvd[6];
 } __attribute__ ((aligned (64)));
 
-#define ept_get_wl(ept)   ((ept)->ept_wl)
-#define ept_get_asr(ept)  ((ept)->asr)
-#define ept_get_eptp(ept) ((ept)->eptp)
-
 #define NR_PML_ENTRIES   512
 
 struct pi_blocking_vcpu {
@@ -129,9 +110,11 @@ struct arch_vmx_struct {
     u32                  secondary_exec_control;
     u32                  exception_bitmap;
 
-    struct vmx_msr_state msr_state;
-    unsigned long        shadow_gs;
-    unsigned long        cstar;
+    uint64_t             shadow_gs;
+    uint64_t             star;
+    uint64_t             lstar;
+    uint64_t             cstar;
+    uint64_t             sfmask;
 
     unsigned long       *msr_bitmap;
     unsigned int         msr_count;
@@ -152,6 +135,9 @@ struct arch_vmx_struct {
     uint8_t              vmx_realmode;
     /* Are we emulating rather than VMENTERing? */
     uint8_t              vmx_emulate;
+
+    bool                 lbr_tsx_fixup_enabled;
+
     /* Bitmask of segments that we can't safely use in virtual 8086 mode */
     uint16_t             vm86_segment_mask;
     /* Shadow CS, SS, DS, ES, FS, GS, TR while in virtual 8086 mode */
@@ -179,6 +165,7 @@ void vmx_destroy_vmcs(struct vcpu *v);
 void vmx_vmcs_enter(struct vcpu *v);
 bool_t __must_check vmx_vmcs_try_enter(struct vcpu *v);
 void vmx_vmcs_exit(struct vcpu *v);
+void vmx_vmcs_reload(struct vcpu *v);
 
 #define CPU_BASED_VIRTUAL_INTR_PENDING        0x00000004
 #define CPU_BASED_USE_TSC_OFFSETING           0x00000008
@@ -287,6 +274,8 @@ extern u64 vmx_ept_vpid_cap;
     (vmx_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS)
 #define cpu_has_vmx_ept \
     (vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_EPT)
+#define cpu_has_vmx_dt_exiting \
+    (vmx_secondary_exec_control & SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING)
 #define cpu_has_vmx_vpid \
     (vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VPID)
 #define cpu_has_monitor_trap_flag \
@@ -518,20 +507,25 @@ enum vmcs_field {
 /* VM Instruction error numbers */
 enum vmx_insn_errno
 {
+    VMX_INSN_SUCCEED                       = 0,
     VMX_INSN_VMCLEAR_INVALID_PHYADDR       = 2,
     VMX_INSN_VMLAUNCH_NONCLEAR_VMCS        = 4,
     VMX_INSN_VMRESUME_NONLAUNCHED_VMCS     = 5,
     VMX_INSN_INVALID_CONTROL_STATE         = 7,
     VMX_INSN_INVALID_HOST_STATE            = 8,
     VMX_INSN_VMPTRLD_INVALID_PHYADDR       = 9,
+    VMX_INSN_VMPTRLD_INCORRECT_VMCS_ID     = 11,
     VMX_INSN_UNSUPPORTED_VMCS_COMPONENT    = 12,
     VMX_INSN_VMXON_IN_VMX_ROOT             = 15,
+    VMX_INSN_VMENTRY_BLOCKED_BY_MOV_SS     = 26,
+    VMX_INSN_FAIL_INVALID                  = ~0,
 };
 
 void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type);
 void vmx_enable_intercept_for_msr(struct vcpu *v, u32 msr, int type);
 int vmx_read_guest_msr(u32 msr, u64 *val);
 int vmx_write_guest_msr(u32 msr, u64 val);
+struct vmx_msr_entry *vmx_find_msr(u32 msr, int type);
 int vmx_add_msr(u32 msr, int type);
 void vmx_vmcs_switch(paddr_t from, paddr_t to);
 void vmx_set_eoi_exit_bitmap(struct vcpu *v, u8 vector);
@@ -540,7 +534,11 @@ int vmx_check_msr_bitmap(unsigned long *msr_bitmap, u32 msr, int access_type);
 void virtual_vmcs_enter(const struct vcpu *);
 void virtual_vmcs_exit(const struct vcpu *);
 u64 virtual_vmcs_vmread(const struct vcpu *, u32 encoding);
+enum vmx_insn_errno virtual_vmcs_vmread_safe(const struct vcpu *v,
+                                             u32 vmcs_encoding, u64 *val);
 void virtual_vmcs_vmwrite(const struct vcpu *, u32 encoding, u64 val);
+enum vmx_insn_errno virtual_vmcs_vmwrite_safe(const struct vcpu *v,
+                                              u32 vmcs_encoding, u64 val);
 
 static inline int vmx_add_guest_msr(u32 msr)
 {

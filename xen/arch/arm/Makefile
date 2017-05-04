@@ -18,6 +18,8 @@ obj-$(EARLY_PRINTK) += early_printk.o
 obj-y += gic.o
 obj-y += gic-v2.o
 obj-$(CONFIG_HAS_GICV3) += gic-v3.o
+obj-$(CONFIG_HAS_ITS) += gic-v3-its.o
+obj-$(CONFIG_HAS_ITS) += gic-v3-lpi.o
 obj-y += guestcopy.o
 obj-y += hvm.o
 obj-y += io.o
@@ -45,6 +47,7 @@ obj-y += traps.o
 obj-y += vgic.o
 obj-y += vgic-v2.o
 obj-$(CONFIG_HAS_GICV3) += vgic-v3.o
+obj-$(CONFIG_HAS_ITS) += vgic-v3-its.o
 obj-y += vm_event.o
 obj-y += vtimer.o
 obj-y += vpsci.o
@@ -70,17 +73,11 @@ else
 all_symbols =
 endif
 
-$(TARGET): $(TARGET)-syms $(TARGET).axf
+$(TARGET): $(TARGET)-syms
 	$(OBJCOPY) -O binary -S $< $@
 ifeq ($(CONFIG_ARM_64),y)
 	ln -sf $(notdir $@)  ../../$(notdir $@).efi
 endif
-
-$(TARGET).axf: $(TARGET)-syms
-	# XXX: VE model loads by VMA so instead of
-	# making a proper ELF we link with LMA == VMA and adjust crudely
-	$(OBJCOPY) --change-addresses +0x80000000 $< $@
-	$(STRIP) $@
 
 ifeq ($(CONFIG_LTO),y)
 # Gather all LTO objects together
@@ -120,7 +117,7 @@ asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
 	$(CC) $(filter-out -flto,$(CFLAGS)) -S -o $@ $<
 
 xen.lds: xen.lds.S
-	$(CC) -P -E -Ui386 $(AFLAGS) -DXEN_PHYS_START=$(CONFIG_LOAD_ADDRESS) -o $@ $<
+	$(CC) -P -E -Ui386 $(AFLAGS) -o $@ $<
 	sed -e 's/xen\.lds\.o:/xen\.lds:/g' <.xen.lds.d >.xen.lds.d.new
 	mv -f .xen.lds.d.new .xen.lds.d
 
@@ -130,5 +127,4 @@ dtb.o: $(CONFIG_DTB_FILE)
 clean::
 	rm -f asm-offsets.s xen.lds
 	rm -f $(BASEDIR)/.xen-syms.[0-9]*
-	rm -f $(TARGET).axf
 	rm -f $(TARGET).efi

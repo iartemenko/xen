@@ -120,7 +120,6 @@
  *   regions within it.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -132,6 +131,7 @@
 #include <xen/domain_page.h>
 #include <xen/keyhandler.h>
 #include <xen/perfc.h>
+#include <xen/pfn.h>
 #include <xen/numa.h>
 #include <xen/nodemask.h>
 #include <xen/event.h>
@@ -176,9 +176,6 @@ size_param("bootscrub_chunk", opt_bootscrub_chunk);
  */
 static unsigned int dma_bitsize;
 integer_param("dma_bits", dma_bitsize);
-
-#define round_pgdown(_p)  ((_p)&PAGE_MASK)
-#define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
 
 /* Offlined page list, protected by heap_lock. */
 PAGE_LIST_HEAD(page_offlined_list);
@@ -329,13 +326,16 @@ unsigned long __init alloc_boot_pages(
     unsigned long nr_pfns, unsigned long pfn_align)
 {
     unsigned long pg, _e;
-    int i;
+    unsigned int i = nr_bootmem_regions;
 
-    for ( i = nr_bootmem_regions - 1; i >= 0; i-- )
+    BOOT_BUG_ON(!nr_bootmem_regions);
+
+    while ( i-- )
     {
         struct bootmem_region *r = &bootmem_region_list[i];
+
         pg = (r->e - nr_pfns) & ~(pfn_align - 1);
-        if ( pg < r->s )
+        if ( pg >= r->e || pg < r->s )
             continue;
 
 #if defined(CONFIG_X86) && !defined(NDEBUG)
@@ -520,9 +520,6 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
     unsigned long needed = (sizeof(**_heap) +
                             sizeof(**avail) * NR_ZONES +
                             PAGE_SIZE - 1) >> PAGE_SHIFT;
-#ifdef DIRECTMAP_VIRT_END
-    unsigned long eva = min(DIRECTMAP_VIRT_END, HYPERVISOR_VIRT_END);
-#endif
     int i, j;
 
     if ( !first_node_initialised )
@@ -532,9 +529,8 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
         first_node_initialised = 1;
         needed = 0;
     }
-#ifdef DIRECTMAP_VIRT_END
     else if ( *use_tail && nr >= needed &&
-              (mfn + nr) <= (virt_to_mfn(eva - 1) + 1) &&
+              arch_mfn_in_directmap(mfn + nr) &&
               (!xenheap_bits ||
                !((mfn + nr - 1) >> (xenheap_bits - PAGE_SHIFT))) )
     {
@@ -543,7 +539,7 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
                       PAGE_SIZE - sizeof(**avail) * NR_ZONES;
     }
     else if ( nr >= needed &&
-              (mfn + needed) <= (virt_to_mfn(eva - 1) + 1) &&
+              arch_mfn_in_directmap(mfn + needed) &&
               (!xenheap_bits ||
                !((mfn + needed - 1) >> (xenheap_bits - PAGE_SHIFT))) )
     {
@@ -552,7 +548,6 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
                       PAGE_SIZE - sizeof(**avail) * NR_ZONES;
         *use_tail = 0;
     }
-#endif
     else if ( get_order_from_bytes(sizeof(**_heap)) ==
               get_order_from_pages(needed) )
     {
@@ -574,7 +569,7 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
 
     for ( i = 0; i < NR_ZONES; i++ )
         for ( j = 0; j <= MAX_ORDER; j++ )
-            INIT_PAGE_LIST_HEAD(&(*_heap[node])[i][j]);
+            INIT_PAGE_LIST_HEAD(&heap(node, i, j));
 
     return needed;
 }
@@ -983,7 +978,7 @@ static void free_heap_pages(
         if ( (page_to_mfn(pg) & mask) )
         {
             /* Merge with predecessor block? */
-            if ( !mfn_valid(page_to_mfn(pg-mask)) ||
+            if ( !mfn_valid(_mfn(page_to_mfn(pg-mask))) ||
                  !page_state_is(pg-mask, free) ||
                  (PFN_ORDER(pg-mask) != order) ||
                  (phys_to_nid(page_to_maddr(pg-mask)) != node) )
@@ -994,7 +989,7 @@ static void free_heap_pages(
         else
         {
             /* Merge with successor block? */
-            if ( !mfn_valid(page_to_mfn(pg+mask)) ||
+            if ( !mfn_valid(_mfn(page_to_mfn(pg+mask))) ||
                  !page_state_is(pg+mask, free) ||
                  (PFN_ORDER(pg+mask) != order) ||
                  (phys_to_nid(page_to_maddr(pg+mask)) != node) )
@@ -1080,7 +1075,7 @@ int offline_page(unsigned long mfn, int broken, uint32_t *status)
     struct domain *owner;
     struct page_info *pg;
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(_mfn(mfn)) )
     {
         dprintk(XENLOG_WARNING,
                 "try to offline page out of range %lx\n", mfn);
@@ -1189,7 +1184,7 @@ unsigned int online_page(unsigned long mfn, uint32_t *status)
     struct page_info *pg;
     int ret;
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(_mfn(mfn)) )
     {
         dprintk(XENLOG_WARNING, "call expand_pages() first\n");
         return -EINVAL;
@@ -1240,7 +1235,7 @@ int query_page_offline(unsigned long mfn, uint32_t *status)
 {
     struct page_info *pg;
 
-    if ( !mfn_valid(mfn) || !page_is_ram_type(mfn, RAM_TYPE_CONVENTIONAL) )
+    if ( !mfn_valid(_mfn(mfn)) || !page_is_ram_type(mfn, RAM_TYPE_CONVENTIONAL) )
     {
         dprintk(XENLOG_WARNING, "call expand_pages() first\n");
         return -EINVAL;
@@ -1352,6 +1347,7 @@ void __init end_boot_allocator(void)
         if ( r->s < r->e )
             init_heap_pages(mfn_to_page(r->s), r->e - r->s);
     }
+    nr_bootmem_regions = 0;
     init_heap_pages(virt_to_page(bootmem_region_list), 1);
 
     if ( !dma_bitsize && (num_online_nodes() > 1) )
@@ -1409,7 +1405,7 @@ static void __init smp_scrub_heap_pages(void *data)
         pg = mfn_to_page(mfn);
 
         /* Check the mfn is valid and page is free. */
-        if ( !mfn_valid(mfn) || !page_state_is(pg, free) )
+        if ( !mfn_valid(_mfn(mfn)) || !page_state_is(pg, free) )
             continue;
 
         scrub_one_page(pg);

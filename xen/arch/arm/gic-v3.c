@@ -21,7 +21,6 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/cpu.h>
@@ -43,6 +42,7 @@
 #include <asm/device.h>
 #include <asm/gic.h>
 #include <asm/gic_v3_defs.h>
+#include <asm/gic_v3_its.h>
 #include <asm/cpufeature.h>
 #include <asm/acpi.h>
 
@@ -547,6 +547,9 @@ static void __init gicv3_dist_init(void)
     type = readl_relaxed(GICD + GICD_TYPER);
     nr_lines = 32 * ((type & GICD_TYPE_LINES) + 1);
 
+    if ( type & GICD_TYPE_LPIS )
+        gicv3_lpi_init_host_lpis(GICD_TYPE_ID_BITS(type));
+
     printk("GICv3: %d lines, (IID %8.8x).\n",
            nr_lines, readl_relaxed(GICD + GICD_IIDR));
 
@@ -659,6 +662,37 @@ static int __init gicv3_populate_rdist(void)
             if ( (typer >> 32) == aff )
             {
                 this_cpu(rbase) = ptr;
+
+                if ( typer & GICR_TYPER_PLPIS )
+                {
+                    paddr_t rdist_addr;
+                    unsigned int procnum;
+                    int ret;
+
+                    /*
+                     * The ITS refers to redistributors either by their physical
+                     * address or by their ID. Which one to use is an ITS
+                     * choice. So determine those two values here (which we
+                     * can do only here in GICv3 code) and tell the
+                     * ITS code about it, so it can use them later to be able
+                     * to address those redistributors accordingly.
+                     */
+                    rdist_addr = gicv3.rdist_regions[i].base;
+                    rdist_addr += ptr - gicv3.rdist_regions[i].map_base;
+                    procnum = (typer & GICR_TYPER_PROC_NUM_MASK);
+                    procnum >>= GICR_TYPER_PROC_NUM_SHIFT;
+
+                    gicv3_set_redist_address(rdist_addr, procnum);
+
+                    ret = gicv3_lpi_init_rdist(ptr);
+                    if ( ret && ret != -ENODEV )
+                    {
+                        printk("GICv3: CPU%d: Cannot initialize LPIs: %u\n",
+                               smp_processor_id(), ret);
+                        break;
+                    }
+                }
+
                 printk("GICv3: CPU%d: Found redistributor in region %d @%p\n",
                         smp_processor_id(), i, ptr);
                 return 0;
@@ -687,7 +721,7 @@ static int __init gicv3_populate_rdist(void)
 
 static int gicv3_cpu_init(void)
 {
-    int i;
+    int i, ret;
     uint32_t priority;
 
     /* Register ourselves with the rest of the world */
@@ -696,6 +730,13 @@ static int gicv3_cpu_init(void)
 
     if ( gicv3_enable_redist() )
         return -ENODEV;
+
+    if ( gicv3_its_host_has_its() )
+    {
+        ret = gicv3_its_setup_collection(smp_processor_id());
+        if ( ret )
+            return ret;
+    }
 
     /* Set priority on PPI and SGI interrupts */
     priority = (GIC_PRI_IPI << 24 | GIC_PRI_IPI << 16 | GIC_PRI_IPI << 8 |
@@ -1228,11 +1269,12 @@ static void __init gicv3_dt_init(void)
      */
     res = dt_device_get_address(node, 1 + gicv3.rdist_count,
                                 &cbase, &csize);
-    if ( res )
-        return;
+    if ( !res )
+        dt_device_get_address(node, 1 + gicv3.rdist_count + 2,
+                              &vbase, &vsize);
 
-    dt_device_get_address(node, 1 + gicv3.rdist_count + 2,
-                          &vbase, &vsize);
+    /* Check for ITS child nodes and build the host ITS list accordingly. */
+    gicv3_its_dt_init(node);
 }
 
 static int gicv3_iomem_deny_access(const struct domain *d)
@@ -1356,7 +1398,6 @@ gic_acpi_parse_madt_cpu(struct acpi_subtable_header *header,
     if ( !cpu_base_assigned )
     {
         cbase = processor->base_address;
-        csize = SZ_8K;
         vbase = processor->gicv_base_address;
         gicv3_info.maintenance_irq = processor->vgic_interrupt;
 
@@ -1505,6 +1546,25 @@ static void __init gicv3_acpi_init(void)
         panic("GICv3: No valid GICC entries exists");
 
     gicv3.rdist_stride = 0;
+
+    /*
+     * In ACPI, 0 is considered as the invalid address. However the rest
+     * of the initialization rely on the invalid address to be
+     * INVALID_ADDR.
+     *
+     * Also set the size of the GICC and GICV when there base address
+     * is not invalid as those values are not present in ACPI.
+     */
+    if ( !cbase )
+        cbase = INVALID_PADDR;
+    else
+        csize = SZ_8K;
+
+    if ( !vbase )
+        vbase = INVALID_PADDR;
+    else
+        vsize = GUEST_GICC_SIZE;
+
 }
 #else
 static void __init gicv3_acpi_init(void) { }
@@ -1571,6 +1631,11 @@ static int __init gicv3_init(void)
     spin_lock(&gicv3.lock);
 
     gicv3_dist_init();
+
+    res = gicv3_its_init();
+    if ( res )
+        panic("GICv3: ITS: initialization failed: %d\n", res);
+
     res = gicv3_cpu_init();
     gicv3_hyp_init();
 

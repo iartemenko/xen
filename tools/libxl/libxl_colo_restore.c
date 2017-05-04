@@ -607,13 +607,14 @@ static void colo_restore_preresume_cb(libxl__egc *egc,
     }
 
     if (crs->qdisk_setuped) {
-        if (libxl__qmp_do_checkpoint(gc, crs->domid)) {
+        if (libxl__qmp_colo_do_checkpoint(gc, crs->domid)) {
             LOGD(ERROR, crs->domid, "doing checkpoint fails");
             goto out;
         }
     }
 
-    colo_proxy_preresume(&crs->cps);
+    if (!crs->cps.is_userspace_proxy)
+        colo_proxy_preresume(&crs->cps);
 
     colo_restore_resume_vm(egc, crcs);
 
@@ -774,17 +775,23 @@ static void colo_setup_checkpoint_devices(libxl__egc *egc,
 
     STATE_AO_GC(crs->ao);
 
-    cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
-                             (1 << LIBXL__DEVICE_KIND_VBD);
+    if (crs->cps.is_userspace_proxy)
+        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VBD);
+    else
+        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
+                                 (1 << LIBXL__DEVICE_KIND_VBD);
+
     cds->callback = colo_restore_setup_cds_done;
     cds->ao = ao;
     cds->domid = crs->domid;
     cds->ops = colo_restore_ops;
 
     crs->cps.ao = ao;
-    if (colo_proxy_setup(&crs->cps)) {
-        LOGD(ERROR, cds->domid, "COLO: failed to setup colo proxy for guest");
-        goto out;
+    if (!crs->cps.is_userspace_proxy) {
+        if (colo_proxy_setup(&crs->cps)) {
+            LOGD(ERROR, cds->domid, "COLO: failed to setup colo proxy for guest");
+            goto out;
+        }
     }
 
     if (init_device_subkind(cds))
@@ -979,7 +986,7 @@ static void colo_suspend_vm_done(libxl__egc *egc,
 
     crcs->status = LIBXL_COLO_SUSPENDED;
 
-    if (libxl__qmp_get_replication_error(gc, crs->domid)) {
+    if (libxl__qmp_query_xen_replication_status(gc, crs->domid)) {
         LOGD(ERROR, crs->domid, "replication error occurs when secondary vm is running");
         goto out;
     }

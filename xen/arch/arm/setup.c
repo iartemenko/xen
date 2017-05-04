@@ -17,7 +17,6 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/config.h>
 #include <xen/compile.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
@@ -269,7 +268,8 @@ void __init discard_initial_modules(void)
         if ( mi->module[i].kind == BOOTMOD_XEN )
             continue;
 
-        if ( !mfn_valid(paddr_to_pfn(s)) || !mfn_valid(paddr_to_pfn(e)))
+        if ( !mfn_valid(_mfn(paddr_to_pfn(s))) ||
+             !mfn_valid(_mfn(paddr_to_pfn(e))))
             continue;
 
         dt_unreserved_regions(s, e, init_domheap_pages, 0);
@@ -724,9 +724,13 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     smp_clear_cpu_maps();
 
-    /* This is mapped by head.S */
-    device_tree_flattened = (void *)BOOT_FDT_VIRT_START
-        + (fdt_paddr & ((1 << SECOND_SHIFT) - 1));
+    device_tree_flattened = early_fdt_map(fdt_paddr);
+    if ( !device_tree_flattened )
+        panic("Invalid device tree blob at physical address %#lx.\n"
+              "The DTB must be 8-byte aligned and must not exceed 2 MB in size.\n\n"
+              "Please check your bootloader.",
+              fdt_paddr);
+
     fdt_size = boot_fdt_info(device_tree_flattened, fdt_paddr);
 
     cmdline = boot_fdt_cmdline(device_tree_flattened);
@@ -756,7 +760,14 @@ void __init start_xen(unsigned long boot_phys_offset,
     end_boot_allocator();
 
     vm_init();
-    dt_unflatten_host_device_tree();
+
+    if ( acpi_disabled )
+    {
+        printk("Booting using Device Tree\n");
+        dt_unflatten_host_device_tree();
+    }
+    else
+        printk("Booting using ACPI\n");
 
     init_IRQ();
 
@@ -776,6 +787,8 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     smp_init_cpus();
     cpus = smp_get_max_cpus();
+    printk(XENLOG_INFO "SMP: Allowing %u CPUs\n", cpus);
+    nr_cpu_ids = cpus;
 
     init_xen_time();
 

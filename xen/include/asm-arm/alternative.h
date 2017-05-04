@@ -2,8 +2,6 @@
 #define __ASM_ALTERNATIVE_H
 
 #include <asm/cpufeature.h>
-#include <xen/config.h>
-#include <xen/kconfig.h>
 
 #ifdef CONFIG_HAS_ALTERNATIVE
 
@@ -160,7 +158,7 @@ static inline void apply_alternatives_all(void)
 {
 }
 
-static inline int apply_alternatives(void *start, size_t lenght)
+static inline int apply_alternatives(void *start, size_t length)
 {
     return 0;
 }

@@ -13,13 +13,14 @@ $(ELF_LIB_OBJS): CFLAGS += -DFUZZ_NO_LIBXC $(CFLAGS_xeninclude)
 
 libelf-fuzzer.o: CFLAGS += $(CFLAGS_xeninclude)
 
-libelf.a: $(ELF_LIB_OBJS)
+libelf.a: libelf-fuzzer.o $(ELF_LIB_OBJS)
 	$(AR) rc $@ $^
 
 .PHONY: libelf-fuzzer-all
 libelf-fuzzer-all: libelf.a libelf-fuzzer.o
 
 afl-libelf-fuzzer: afl-libelf-fuzzer.o libelf-fuzzer.o $(ELF_LIB_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@
 
 # Common targets
 .PHONY: all
@@ -30,7 +31,7 @@ distclean: clean
 
 .PHONY: clean
 clean:
-	rm -f *.o *.a *-libelf-fuzzer
+	rm -f *.o .*.d *.a *-libelf-fuzzer
 
 .PHONY: install
 install: all

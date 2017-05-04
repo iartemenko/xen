@@ -7,7 +7,6 @@
  * Copyright (c) 2003-2005, K A Fraser
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -123,7 +122,8 @@ static void increase_reservation(struct memop_args *a)
         }
 
         /* Inform the domain of the new page's machine address. */ 
-        if ( !guest_handle_is_null(a->extent_list) )
+        if ( !paging_mode_translate(d) &&
+             !guest_handle_is_null(a->extent_list) )
         {
             mfn = page_to_mfn(page);
             if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
@@ -192,7 +192,7 @@ static void populate_physmap(struct memop_args *a)
 
                 for ( j = 0; j < (1U << a->extent_order); j++, mfn++ )
                 {
-                    if ( !mfn_valid(mfn) )
+                    if ( !mfn_valid(_mfn(mfn)) )
                     {
                         gdprintk(XENLOG_INFO, "Invalid mfn %#"PRI_xen_pfn"\n",
                                  mfn);
@@ -239,7 +239,8 @@ static void populate_physmap(struct memop_args *a)
 
             guest_physmap_add_page(d, _gfn(gpfn), _mfn(mfn), a->extent_order);
 
-            if ( !paging_mode_translate(d) )
+            if ( !paging_mode_translate(d) &&
+                 !guest_handle_is_null(a->extent_list) )
             {
                 for ( j = 0; j < (1U << a->extent_order); j++ )
                     set_gpfn_from_mfn(mfn + j, gpfn + j);
@@ -275,7 +276,7 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
          * actual page that needs to be released. */
         if ( p2mt == p2m_ram_paging_out )
         {
-            ASSERT(mfn_valid(mfn_x(mfn)));
+            ASSERT(mfn_valid(mfn));
             page = mfn_to_page(mfn_x(mfn));
             if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
                 put_page(page);
@@ -292,7 +293,7 @@ int guest_remove_page(struct domain *d, unsigned long gmfn)
 #else
     mfn = gfn_to_mfn(d, _gfn(gmfn));
 #endif
-    if ( unlikely(!mfn_valid(mfn_x(mfn))) )
+    if ( unlikely(!mfn_valid(mfn)) )
     {
         put_gfn(d, gmfn);
         gdprintk(XENLOG_INFO, "Domain %u page number %lx invalid\n",
@@ -437,8 +438,8 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
         goto fail_early;
     }
 
-    if ( !guest_handle_okay(exch.in.extent_start, exch.in.nr_extents) ||
-         !guest_handle_okay(exch.out.extent_start, exch.out.nr_extents) )
+    if ( !guest_handle_subrange_okay(exch.in.extent_start, exch.nr_exchanged,
+                                     exch.in.nr_extents - 1) )
     {
         rc = -EFAULT;
         goto fail_early;
@@ -448,11 +449,27 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
     {
         in_chunk_order  = exch.out.extent_order - exch.in.extent_order;
         out_chunk_order = 0;
+
+        if ( !guest_handle_subrange_okay(exch.out.extent_start,
+                                         exch.nr_exchanged >> in_chunk_order,
+                                         exch.out.nr_extents - 1) )
+        {
+            rc = -EFAULT;
+            goto fail_early;
+        }
     }
     else
     {
         in_chunk_order  = 0;
         out_chunk_order = exch.in.extent_order - exch.out.extent_order;
+
+        if ( !guest_handle_subrange_okay(exch.out.extent_start,
+                                         exch.nr_exchanged << out_chunk_order,
+                                         exch.out.nr_extents - 1) )
+        {
+            rc = -EFAULT;
+            goto fail_early;
+        }
     }
 
     d = rcu_lock_domain_by_any_id(exch.in.domid);
@@ -516,7 +533,7 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
 #else /* !CONFIG_X86 */
                 mfn = mfn_x(gfn_to_mfn(d, _gfn(gmfn + k)));
 #endif
-                if ( unlikely(!mfn_valid(mfn)) )
+                if ( unlikely(!mfn_valid(_mfn(mfn))) )
                 {
                     put_gfn(d, gmfn + k);
                     rc = -EINVAL;
@@ -624,6 +641,9 @@ static long memory_exchange(XEN_GUEST_HANDLE_PARAM(xen_memory_exchange_t) arg)
             }
         }
         BUG_ON( !(d->is_dying) && (j != (1UL << out_chunk_order)) );
+
+        if ( rc )
+            goto fail;
     }
 
     exch.nr_exchanged = exch.in.nr_extents;

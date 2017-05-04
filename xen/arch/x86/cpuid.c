@@ -6,6 +6,7 @@
 #include <asm/hvm/nestedhvm.h>
 #include <asm/hvm/svm/svm.h>
 #include <asm/hvm/vmx/vmcs.h>
+#include <asm/paging.h>
 #include <asm/processor.h>
 #include <asm/xstate.h>
 
@@ -163,7 +164,14 @@ static void recalculate_xstate(struct cpuid_policy *p)
  */
 static void recalculate_misc(struct cpuid_policy *p)
 {
+    p->basic.raw_fms &= 0x0fff0fff; /* Clobber Processor Type on Intel. */
+    p->basic.apic_id = 0; /* Dynamic. */
+
+    p->basic.raw[0x5] = EMPTY_LEAF; /* MONITOR not exposed to guests. */
+    p->basic.raw[0x6] = EMPTY_LEAF; /* Therm/Power not exposed to guests. */
+
     p->basic.raw[0x8] = EMPTY_LEAF;
+    p->basic.raw[0xb] = EMPTY_LEAF; /* TODO: Rework topology logic. */
     p->basic.raw[0xc] = EMPTY_LEAF;
 
     p->extd.e1d &= ~CPUID_COMMON_1D_FEATURES;
@@ -195,7 +203,8 @@ static void recalculate_misc(struct cpuid_policy *p)
 
     case X86_VENDOR_AMD:
         zero_leaves(p->basic.raw, 0x2, 0x3);
-        p->basic.raw[0x9] = EMPTY_LEAF;
+        memset(p->cache.raw, 0, sizeof(p->cache.raw));
+        zero_leaves(p->basic.raw, 0x9, 0xa);
 
         p->extd.vendor_ebx = p->basic.vendor_ebx;
         p->extd.vendor_ecx = p->basic.vendor_ecx;
@@ -236,6 +245,32 @@ static void __init calculate_raw_policy(void)
         }
 
         cpuid_leaf(i, &p->basic.raw[i]);
+    }
+
+    if ( p->basic.max_leaf >= 4 )
+    {
+        for ( i = 0; i < ARRAY_SIZE(p->cache.raw); ++i )
+        {
+            union {
+                struct cpuid_leaf l;
+                struct cpuid_cache_leaf c;
+            } u;
+
+            cpuid_count_leaf(4, i, &u.l);
+
+            if ( u.c.type == 0 )
+                break;
+
+            p->cache.subleaf[i] = u.c;
+        }
+
+        /*
+         * The choice of CPUID_GUEST_NR_CACHE is arbitrary.  It is expected
+         * that it will eventually need increasing for future hardware.
+         */
+        if ( i == ARRAY_SIZE(p->cache.raw) )
+            printk(XENLOG_WARNING
+                   "CPUID: Insufficient Leaf 4 space for this hardware\n");
     }
 
     if ( p->basic.max_leaf >= 7 )
@@ -502,9 +537,12 @@ void recalculate_cpuid_policy(struct domain *d)
 
     cpuid_featureset_to_policy(fs, p);
 
+    /* Pass host cacheline size through to guests. */
+    p->basic.clflush_size = max->basic.clflush_size;
+
     p->extd.maxphysaddr = min(p->extd.maxphysaddr, max->extd.maxphysaddr);
     p->extd.maxphysaddr = min_t(uint8_t, p->extd.maxphysaddr,
-                                d->arch.paging.gfn_bits + PAGE_SHIFT);
+                                paging_max_paddr_bits(d));
     p->extd.maxphysaddr = max_t(uint8_t, p->extd.maxphysaddr,
                                 (p->basic.pae || p->basic.pse36) ? 36 : 32);
 
@@ -512,6 +550,23 @@ void recalculate_cpuid_policy(struct domain *d)
 
     recalculate_xstate(p);
     recalculate_misc(p);
+
+    for ( i = 0; i < ARRAY_SIZE(p->cache.raw); ++i )
+    {
+        if ( p->cache.subleaf[i].type >= 1 &&
+             p->cache.subleaf[i].type <= 3 )
+        {
+            /* Subleaf has a valid cache type. Zero reserved fields. */
+            p->cache.raw[i].a &= 0xffffc3ffu;
+            p->cache.raw[i].d &= 0x00000007u;
+        }
+        else
+        {
+            /* Subleaf is not valid.  Zero the rest of the union. */
+            zero_leaves(p->cache.raw, i, ARRAY_SIZE(p->cache.raw) - 1);
+            break;
+        }
+    }
 
     if ( !p->extd.svm )
         p->extd.raw[0xa] = EMPTY_LEAF;
@@ -527,8 +582,6 @@ void recalculate_cpuid_policy(struct domain *d)
 
 int init_domain_cpuid_policy(struct domain *d)
 {
-    unsigned int i;
-
     d->arch.cpuid = xmalloc(struct cpuid_policy);
 
     if ( !d->arch.cpuid )
@@ -541,295 +594,7 @@ int init_domain_cpuid_policy(struct domain *d)
 
     recalculate_cpuid_policy(d);
 
-    for ( i = 0; i < MAX_CPUID_INPUT; i++ )
-    {
-        d->arch.cpuid->legacy[i].input[0] = XEN_CPUID_INPUT_UNUSED;
-        d->arch.cpuid->legacy[i].input[1] = XEN_CPUID_INPUT_UNUSED;
-    }
-
     return 0;
-}
-
-static void domain_cpuid(const struct domain *d, uint32_t leaf,
-                         uint32_t subleaf, struct cpuid_leaf *res)
-{
-    unsigned int i;
-
-    for ( i = 0; i < MAX_CPUID_INPUT; i++ )
-    {
-        xen_domctl_cpuid_t *cpuid = &d->arch.cpuid->legacy[i];
-
-        if ( (cpuid->input[0] == leaf) &&
-             ((cpuid->input[1] == XEN_CPUID_INPUT_UNUSED) ||
-              (cpuid->input[1] == subleaf)) )
-        {
-            *res = (struct cpuid_leaf){ cpuid->eax, cpuid->ebx,
-                                        cpuid->ecx, cpuid->edx };
-            return;
-        }
-    }
-}
-
-static void pv_cpuid(uint32_t leaf, uint32_t subleaf, struct cpuid_leaf *res)
-{
-    struct vcpu *curr = current;
-    struct domain *currd = curr->domain;
-    const struct cpuid_policy *p = currd->arch.cpuid;
-
-    if ( !is_control_domain(currd) && !is_hardware_domain(currd) )
-        domain_cpuid(currd, leaf, subleaf, res);
-    else
-        cpuid_count_leaf(leaf, subleaf, res);
-
-    switch ( leaf )
-    {
-    case 0x00000001:
-        res->c = p->basic._1c;
-        res->d = p->basic._1d;
-
-        if ( !is_pvh_domain(currd) )
-        {
-            const struct cpu_user_regs *regs = guest_cpu_user_regs();
-
-            /*
-             * Delete the PVH condition when HVMLite formally replaces PVH,
-             * and HVM guests no longer enter a PV codepath.
-             */
-
-            /*
-             * !!! OSXSAVE handling for PV guests is non-architectural !!!
-             *
-             * Architecturally, the correct code here is simply:
-             *
-             *   if ( curr->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE )
-             *       c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
-             *
-             * However because of bugs in Xen (before c/s bd19080b, Nov 2010,
-             * the XSAVE cpuid flag leaked into guests despite the feature not
-             * being available for use), buggy workarounds where introduced to
-             * Linux (c/s 947ccf9c, also Nov 2010) which relied on the fact
-             * that Xen also incorrectly leaked OSXSAVE into the guest.
-             *
-             * Furthermore, providing architectural OSXSAVE behaviour to a
-             * many Linux PV guests triggered a further kernel bug when the
-             * fpu code observes that XSAVEOPT is available, assumes that
-             * xsave state had been set up for the task, and follows a wild
-             * pointer.
-             *
-             * Older Linux PVOPS kernels however do require architectural
-             * behaviour.  They observe Xen's leaked OSXSAVE and assume they
-             * can already use XSETBV, dying with a #UD because the shadowed
-             * CR4.OSXSAVE is clear.  This behaviour has been adjusted in all
-             * observed cases via stable backports of the above changeset.
-             *
-             * Therefore, the leaking of Xen's OSXSAVE setting has become a
-             * defacto part of the PV ABI and can't reasonably be corrected.
-             * It can however be restricted to only the enlightened CPUID
-             * view, as seen by the guest kernel.
-             *
-             * The following situations and logic now applies:
-             *
-             * - Hardware without CPUID faulting support and native CPUID:
-             *    There is nothing Xen can do here.  The hosts XSAVE flag will
-             *    leak through and Xen's OSXSAVE choice will leak through.
-             *
-             *    In the case that the guest kernel has not set up OSXSAVE, only
-             *    SSE will be set in xcr0, and guest userspace can't do too much
-             *    damage itself.
-             *
-             * - Enlightened CPUID or CPUID faulting available:
-             *    Xen can fully control what is seen here.  Guest kernels need
-             *    to see the leaked OSXSAVE via the enlightened path, but
-             *    guest userspace and the native is given architectural
-             *    behaviour.
-             *
-             *    Emulated vs Faulted CPUID is distinguised based on whether a
-             *    #UD or #GP is currently being serviced.
-             */
-            /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
-            if ( (curr->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE) ||
-                 (regs->entry_vector == TRAP_invalid_op &&
-                  guest_kernel_mode(curr, regs) &&
-                  (read_cr4() & X86_CR4_OSXSAVE)) )
-                res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
-
-            /*
-             * At the time of writing, a PV domain is the only viable option
-             * for Dom0.  Several interactions between dom0 and Xen for real
-             * hardware setup have unfortunately been implemented based on
-             * state which incorrectly leaked into dom0.
-             *
-             * These leaks are retained for backwards compatibility, but
-             * restricted to the hardware domains kernel only.
-             */
-            if ( is_hardware_domain(currd) && guest_kernel_mode(curr, regs) )
-            {
-                /*
-                 * MTRR used to unconditionally leak into PV guests.  They
-                 * cannot MTRR infrastructure at all, and shouldn't be able to
-                 * see the feature.
-                 *
-                 * Modern PVOPS Linux self-clobbers the MTRR feature, to avoid
-                 * trying to use the associated MSRs.  Xenolinux-based PV dom0's
-                 * however use the MTRR feature as an indication of the presence
-                 * of the XENPF_{add,del,read}_memtype hypercalls.
-                 */
-                if ( cpu_has_mtrr )
-                    res->d |= cpufeat_mask(X86_FEATURE_MTRR);
-
-                /*
-                 * MONITOR never leaked into PV guests, as PV guests cannot
-                 * use the MONITOR/MWAIT instructions.  As such, they require
-                 * the feature to not being present in emulated CPUID.
-                 *
-                 * Modern PVOPS Linux try to be cunning and use native CPUID
-                 * to see if the hardware actually supports MONITOR, and by
-                 * extension, deep C states.
-                 *
-                 * If the feature is seen, deep-C state information is
-                 * obtained from the DSDT and handed back to Xen via the
-                 * XENPF_set_processor_pminfo hypercall.
-                 *
-                 * This mechanism is incompatible with an HVM-based hardware
-                 * domain, and also with CPUID Faulting.
-                 *
-                 * Luckily, Xen can be just as 'cunning', and distinguish an
-                 * emulated CPUID from a faulted CPUID by whether a #UD or #GP
-                 * fault is currently being serviced.  Yuck...
-                 */
-                if ( cpu_has_monitor && regs->entry_vector == TRAP_gp_fault )
-                    res->c |= cpufeat_mask(X86_FEATURE_MONITOR);
-
-                /*
-                 * While MONITOR never leaked into PV guests, EIST always used
-                 * to.
-                 *
-                 * Modern PVOPS will only parse P state information from the
-                 * DSDT and return it to Xen if EIST is seen in the emulated
-                 * CPUID information.
-                 */
-                if ( cpu_has_eist )
-                    res->c |= cpufeat_mask(X86_FEATURE_EIST);
-            }
-        }
-
-        if ( vpmu_enabled(curr) &&
-             vpmu_is_set(vcpu_vpmu(curr), VPMU_CPU_HAS_DS) )
-        {
-            res->d |= cpufeat_mask(X86_FEATURE_DS);
-            if ( cpu_has(&current_cpu_data, X86_FEATURE_DTES64) )
-                res->c |= cpufeat_mask(X86_FEATURE_DTES64);
-            if ( cpu_has(&current_cpu_data, X86_FEATURE_DSCPL) )
-                res->c |= cpufeat_mask(X86_FEATURE_DSCPL);
-        }
-        break;
-
-    case 0x0000000a: /* Architectural Performance Monitor Features (Intel) */
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
-             !vpmu_enabled(curr) )
-            goto unsupported;
-
-        /* Report at most version 3 since that's all we currently emulate. */
-        if ( (res->a & 0xff) > 3 )
-            res->a = (res->a & ~0xff) | 3;
-        break;
-
-    case 0x00000005: /* MONITOR/MWAIT */
-    case 0x0000000b: /* Extended Topology Enumeration */
-    unsupported:
-        *res = EMPTY_LEAF;
-        break;
-
-    case 0x0:
-    case 0x2 ... 0x3:
-    case 0x7 ... 0x9:
-    case 0xc ... XSTATE_CPUID:
-    case 0x80000000 ... 0xffffffff:
-        ASSERT_UNREACHABLE();
-        /* Now handled in guest_cpuid(). */
-    }
-}
-
-static void hvm_cpuid(uint32_t leaf, uint32_t subleaf, struct cpuid_leaf *res)
-{
-    struct vcpu *v = current;
-    struct domain *d = v->domain;
-    const struct cpuid_policy *p = d->arch.cpuid;
-
-    domain_cpuid(d, leaf, subleaf, res);
-
-    switch ( leaf )
-    {
-    case 0x1:
-        /* Fix up VLAPIC details. */
-        res->b &= 0x00FFFFFFu;
-        res->b |= (v->vcpu_id * 2) << 24;
-
-        res->c = p->basic._1c;
-        res->d = p->basic._1d;
-
-        /* APIC exposed to guests, but Fast-forward MSR_APIC_BASE.EN back in. */
-        if ( vlapic_hw_disabled(vcpu_vlapic(v)) )
-            res->d &= ~cpufeat_bit(X86_FEATURE_APIC);
-
-        /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
-        if ( v->arch.hvm_vcpu.guest_cr[4] & X86_CR4_OSXSAVE )
-            res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
-
-        /*
-         * PSE36 is not supported in shadow mode.  This bit should be
-         * unilaterally cleared.
-         *
-         * However, an unspecified version of Hyper-V from 2011 refuses
-         * to start as the "cpu does not provide required hw features" if
-         * it can't see PSE36.
-         *
-         * As a workaround, leak the toolstack-provided PSE36 value into a
-         * shadow guest if the guest is already using PAE paging (and won't
-         * care about reverting back to PSE paging).  Otherwise, knoble it, so
-         * a 32bit guest doesn't get the impression that it could try to use
-         * PSE36 paging.
-         */
-        if ( !hap_enabled(d) && !hvm_pae_enabled(v) )
-            res->d &= ~cpufeat_mask(X86_FEATURE_PSE36);
-
-        if ( vpmu_enabled(v) &&
-             vpmu_is_set(vcpu_vpmu(v), VPMU_CPU_HAS_DS) )
-        {
-            res->d |= cpufeat_mask(X86_FEATURE_DS);
-            if ( cpu_has(&current_cpu_data, X86_FEATURE_DTES64) )
-                res->c |= cpufeat_mask(X86_FEATURE_DTES64);
-            if ( cpu_has(&current_cpu_data, X86_FEATURE_DSCPL) )
-                res->c |= cpufeat_mask(X86_FEATURE_DSCPL);
-        }
-
-        break;
-
-    case 0xb:
-        /* Fix the x2APIC identifier. */
-        res->d = v->vcpu_id * 2;
-        break;
-
-    case 0x0000000a: /* Architectural Performance Monitor Features (Intel) */
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL || !vpmu_enabled(v) )
-        {
-            *res = EMPTY_LEAF;
-            break;
-        }
-
-        /* Report at most version 3 since that's all we currently emulate */
-        if ( (res->a & 0xff) > 3 )
-            res->a = (res->a & ~0xff) | 3;
-        break;
-
-    case 0x0:
-    case 0x2 ... 0x3:
-    case 0x7 ... 0x9:
-    case 0xc ... XSTATE_CPUID:
-    case 0x80000000 ... 0xffffffff:
-        ASSERT_UNREACHABLE();
-        /* Now handled in guest_cpuid(). */
-    }
 }
 
 void guest_cpuid(const struct vcpu *v, uint32_t leaf,
@@ -857,6 +622,13 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
 
         switch ( leaf )
         {
+        case 0x4:
+            if ( subleaf >= ARRAY_SIZE(p->cache.raw) )
+                return;
+
+            *res = p->cache.raw[subleaf];
+            break;
+
         case 0x7:
             ASSERT(p->feat.max_subleaf < ARRAY_SIZE(p->feat.raw));
             if ( subleaf > min_t(uint32_t, p->feat.max_subleaf,
@@ -874,12 +646,6 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
             break;
 
         default:
-            goto legacy;
-
-        case 0x0:
-        case 0x2 ... 0x3:
-        case 0x8 ... 0x9:
-        case 0xc:
             *res = p->basic.raw[leaf];
             break;
         }
@@ -928,6 +694,152 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
      */
     switch ( leaf )
     {
+        const struct cpu_user_regs *regs;
+
+    case 0x1:
+        /* TODO: Rework topology logic. */
+        res->b &= 0x00ffffffu;
+        if ( is_hvm_domain(d) )
+            res->b |= (v->vcpu_id * 2) << 24;
+
+        /* TODO: Rework vPMU control in terms of toolstack choices. */
+        if ( vpmu_available(v) &&
+             vpmu_is_set(vcpu_vpmu(v), VPMU_CPU_HAS_DS) )
+        {
+            res->d |= cpufeat_mask(X86_FEATURE_DS);
+            if ( cpu_has(&current_cpu_data, X86_FEATURE_DTES64) )
+                res->c |= cpufeat_mask(X86_FEATURE_DTES64);
+            if ( cpu_has(&current_cpu_data, X86_FEATURE_DSCPL) )
+                res->c |= cpufeat_mask(X86_FEATURE_DSCPL);
+        }
+
+        if ( is_hvm_domain(d) )
+        {
+            /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
+            if ( v->arch.hvm_vcpu.guest_cr[4] & X86_CR4_OSXSAVE )
+                res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
+        }
+        else /* PV domain */
+        {
+            regs = guest_cpu_user_regs();
+
+            /*
+             * !!! OSXSAVE handling for PV guests is non-architectural !!!
+             *
+             * Architecturally, the correct code here is simply:
+             *
+             *   if ( v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE )
+             *       c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
+             *
+             * However because of bugs in Xen (before c/s bd19080b, Nov 2010,
+             * the XSAVE cpuid flag leaked into guests despite the feature not
+             * being available for use), buggy workarounds where introduced to
+             * Linux (c/s 947ccf9c, also Nov 2010) which relied on the fact
+             * that Xen also incorrectly leaked OSXSAVE into the guest.
+             *
+             * Furthermore, providing architectural OSXSAVE behaviour to a
+             * many Linux PV guests triggered a further kernel bug when the
+             * fpu code observes that XSAVEOPT is available, assumes that
+             * xsave state had been set up for the task, and follows a wild
+             * pointer.
+             *
+             * Older Linux PVOPS kernels however do require architectural
+             * behaviour.  They observe Xen's leaked OSXSAVE and assume they
+             * can already use XSETBV, dying with a #UD because the shadowed
+             * CR4.OSXSAVE is clear.  This behaviour has been adjusted in all
+             * observed cases via stable backports of the above changeset.
+             *
+             * Therefore, the leaking of Xen's OSXSAVE setting has become a
+             * defacto part of the PV ABI and can't reasonably be corrected.
+             * It can however be restricted to only the enlightened CPUID
+             * view, as seen by the guest kernel.
+             *
+             * The following situations and logic now applies:
+             *
+             * - Hardware without CPUID faulting support and native CPUID:
+             *    There is nothing Xen can do here.  The hosts XSAVE flag will
+             *    leak through and Xen's OSXSAVE choice will leak through.
+             *
+             *    In the case that the guest kernel has not set up OSXSAVE, only
+             *    SSE will be set in xcr0, and guest userspace can't do too much
+             *    damage itself.
+             *
+             * - Enlightened CPUID or CPUID faulting available:
+             *    Xen can fully control what is seen here.  Guest kernels need
+             *    to see the leaked OSXSAVE via the enlightened path, but
+             *    guest userspace and the native is given architectural
+             *    behaviour.
+             *
+             *    Emulated vs Faulted CPUID is distinguised based on whether a
+             *    #UD or #GP is currently being serviced.
+             */
+            /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
+            if ( (v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE) ||
+                 (regs->entry_vector == TRAP_invalid_op &&
+                  guest_kernel_mode(v, regs) &&
+                  (read_cr4() & X86_CR4_OSXSAVE)) )
+                res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
+
+            /*
+             * At the time of writing, a PV domain is the only viable option
+             * for Dom0.  Several interactions between dom0 and Xen for real
+             * hardware setup have unfortunately been implemented based on
+             * state which incorrectly leaked into dom0.
+             *
+             * These leaks are retained for backwards compatibility, but
+             * restricted to the hardware domains kernel only.
+             */
+            if ( is_hardware_domain(d) && guest_kernel_mode(v, regs) )
+            {
+                /*
+                 * MONITOR never leaked into PV guests, as PV guests cannot
+                 * use the MONITOR/MWAIT instructions.  As such, they require
+                 * the feature to not being present in emulated CPUID.
+                 *
+                 * Modern PVOPS Linux try to be cunning and use native CPUID
+                 * to see if the hardware actually supports MONITOR, and by
+                 * extension, deep C states.
+                 *
+                 * If the feature is seen, deep-C state information is
+                 * obtained from the DSDT and handed back to Xen via the
+                 * XENPF_set_processor_pminfo hypercall.
+                 *
+                 * This mechanism is incompatible with an HVM-based hardware
+                 * domain, and also with CPUID Faulting.
+                 *
+                 * Luckily, Xen can be just as 'cunning', and distinguish an
+                 * emulated CPUID from a faulted CPUID by whether a #UD or #GP
+                 * fault is currently being serviced.  Yuck...
+                 */
+                if ( cpu_has_monitor && regs->entry_vector == TRAP_gp_fault )
+                    res->c |= cpufeat_mask(X86_FEATURE_MONITOR);
+
+                /*
+                 * While MONITOR never leaked into PV guests, EIST always used
+                 * to.
+                 *
+                 * Modern PVOPS Linux will only parse P state information from
+                 * the DSDT and return it to Xen if EIST is seen in the
+                 * emulated CPUID information.
+                 */
+                if ( cpu_has_eist )
+                    res->c |= cpufeat_mask(X86_FEATURE_EIST);
+            }
+        }
+        goto common_leaf1_adjustments;
+
+    case 0x5:
+        /*
+         * Leak the hardware MONITOR leaf under the same conditions that the
+         * MONITOR feature flag is leaked.  See above for details.
+         */
+        regs = guest_cpu_user_regs();
+        if ( is_pv_domain(d) && is_hardware_domain(d) &&
+             guest_kernel_mode(v, regs) && cpu_has_monitor &&
+             regs->entry_vector == TRAP_gp_fault )
+            *res = raw_policy.basic.raw[leaf];
+        break;
+
     case 0x7:
         switch ( subleaf )
         {
@@ -938,6 +850,36 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
                   : v->arch.hvm_vcpu.guest_cr[4]) & X86_CR4_PKE )
                 res->c |= cpufeat_mask(X86_FEATURE_OSPKE);
             break;
+        }
+        break;
+
+    case 0xa:
+        /* TODO: Rework vPMU control in terms of toolstack choices. */
+        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL ||
+             !vpmu_available(v) )
+            *res = EMPTY_LEAF;
+        else
+        {
+            /* Report at most v3 since that's all we currently emulate. */
+            if ( (res->a & 0xff) > 3 )
+                res->a = (res->a & ~0xff) | 3;
+        }
+        break;
+
+    case 0xb:
+        /*
+         * In principle, this leaf is Intel-only.  In practice, it is tightly
+         * coupled with x2apic, and we offer an x2apic-capable APIC emulation
+         * to guests on AMD hardware as well.
+         *
+         * TODO: Rework topology logic.
+         */
+        if ( p->basic.x2apic )
+        {
+            *(uint8_t *)&res->c = subleaf;
+
+            /* Fix the x2APIC identifier. */
+            res->d = v->vcpu_id * 2;
         }
         break;
 
@@ -967,7 +909,13 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
         break;
 
     case 0x80000001:
-        if ( has_hvm_container_domain(d) )
+        /* SYSCALL is hidden outside of long mode on Intel. */
+        if ( p->x86_vendor == X86_VENDOR_INTEL &&
+             is_hvm_domain(d) && !hvm_long_mode_active(v) )
+            res->d &= ~cpufeat_mask(X86_FEATURE_SYSCALL);
+
+    common_leaf1_adjustments:
+        if ( is_hvm_domain(d) )
         {
             /* Fast-forward MSR_APIC_BASE.EN. */
             if ( vlapic_hw_disabled(vcpu_vlapic(v)) )
@@ -989,10 +937,6 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
              */
             if ( !hap_enabled(d) && !hvm_pae_enabled(v) )
                 res->d &= ~cpufeat_mask(X86_FEATURE_PSE36);
-
-            /* SYSCALL is hidden outside of long mode on Intel. */
-            if ( p->x86_vendor == X86_VENDOR_INTEL && !hvm_long_mode_enabled(v) )
-                res->d &= ~cpufeat_mask(X86_FEATURE_SYSCALL);
         }
         else /* PV domain */
         {
@@ -1018,14 +962,6 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
             res->a = (res->d & v->arch.hvm_svm.guest_lwp_cfg) | 1;
         break;
     }
-
-    /* Done. */
-    return;
-
- legacy:
-    /* {hvm,pv}_cpuid() have this expectation. */
-    ASSERT(v == current);
-    (is_hvm_domain(d) ? hvm_cpuid : pv_cpuid)(leaf, subleaf, res);
 }
 
 static void __init __maybe_unused build_assertions(void)

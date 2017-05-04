@@ -815,7 +815,7 @@ static int pci_clean_dpci_irqs(struct domain *d)
             return ret;
         }
 
-        d->arch.hvm_domain.irq.dpci = NULL;
+        hvm_domain_irq(d)->dpci = NULL;
         free_hvm_irq_dpci(hvm_irq_dpci);
     }
     spin_unlock(&d->event_lock);
@@ -1603,6 +1603,13 @@ int iommu_do_pci_domctl(
         break;
 
     case XEN_DOMCTL_assign_device:
+        /* Don't support self-assignment of devices. */
+        if ( d == current->domain )
+        {
+            ret = -EINVAL;
+            break;
+        }
+
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
             break;
@@ -1643,6 +1650,13 @@ int iommu_do_pci_domctl(
         break;
 
     case XEN_DOMCTL_deassign_device:
+        /* Don't support self-deassignment of devices. */
+        if ( d == current->domain )
+        {
+            ret = -EINVAL;
+            break;
+        }
+
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
             break;

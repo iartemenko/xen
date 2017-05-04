@@ -2,7 +2,6 @@
  * multicall.c
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -79,7 +78,7 @@ do_multicall(
 
         if ( unlikely(__copy_field_to_guest(call_list, &mcs->call, result)) )
             rc = -EFAULT;
-        else if ( mcs->flags & MCSF_call_preempted )
+        else if ( current->hcall_preempted )
         {
             /* Translate sub-call continuation to guest layout */
             xlat_multicall_entry(mcs);
@@ -87,6 +86,8 @@ do_multicall(
             /* Copy the sub-call continuation. */
             if ( likely(!__copy_to_guest(call_list, &mcs->call, 1)) )
                 goto preempted;
+            else
+                hypercall_cancel_continuation();
             rc = -EFAULT;
         }
         else

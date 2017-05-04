@@ -67,7 +67,7 @@ static int write_hvm_params(struct xc_sr_context *ctx)
         HVM_PARAM_PAGING_RING_PFN,
         HVM_PARAM_MONITOR_RING_PFN,
         HVM_PARAM_SHARING_RING_PFN,
-        HVM_PARAM_VM86_TSS,
+        HVM_PARAM_VM86_TSS_SIZED,
         HVM_PARAM_CONSOLE_PFN,
         HVM_PARAM_ACPI_IOPORTS_LOCATION,
         HVM_PARAM_VIRIDIAN,
@@ -111,6 +111,10 @@ static int write_hvm_params(struct xc_sr_context *ctx)
             hdr.count++;
         }
     }
+
+    /* No params? Skip this record. */
+    if ( hdr.count == 0 )
+        return 0;
 
     rc = write_split_record(ctx, &rec, entries, hdr.count * sizeof(*entries));
     if ( rc )

@@ -443,7 +443,7 @@ typedef struct xc_dominfo {
     uint32_t      ssidref;
     unsigned int  dying:1, crashed:1, shutdown:1,
                   paused:1, blocked:1, running:1,
-                  hvm:1, debugged:1, pvh:1, xenstore:1, hap:1;
+                  hvm:1, debugged:1, xenstore:1, hap:1;
     unsigned int  shutdown_reason; /* only meaningful if shutdown==1 */
     unsigned long nr_pages; /* current number, not maximum */
     unsigned long nr_outstanding_pages;
@@ -487,6 +487,11 @@ typedef union
 } start_info_any_t;
 #endif
 
+typedef struct xc_vcpu_extstate {
+    uint64_t xfeature_mask;
+    uint64_t size;
+    void *buffer;
+} xc_vcpu_extstate_t;
 
 typedef struct xen_arch_domainconfig xc_domain_configuration_t;
 int xc_domain_create(xc_interface *xch, uint32_t ssidref,
@@ -880,6 +885,24 @@ int xc_vcpu_getcontext(xc_interface *xch,
                        uint32_t vcpu,
                        vcpu_guest_context_any_t *ctxt);
 
+/**
+ * This function returns information about the XSAVE state of a particular
+ * vcpu of a domain. If extstate->size and extstate->xfeature_mask are 0,
+ * the call is considered a query to retrieve them and the buffer is not
+ * filled.
+ *
+ * @parm xch a handle to an open hypervisor interface
+ * @parm domid the domain to get information from
+ * @parm vcpu the vcpu number
+ * @parm extstate a pointer to a structure to store the XSAVE state of the
+ *                domain
+ * @return 0 on success, negative error code on failure
+ */
+int xc_vcpu_get_extstate(xc_interface *xch,
+                         uint32_t domid,
+                         uint32_t vcpu,
+                         xc_vcpu_extstate_t *extstate);
+
 typedef xen_domctl_getvcpuinfo_t xc_vcpuinfo_t;
 int xc_vcpu_getinfo(xc_interface *xch,
                     uint32_t domid,
@@ -1051,6 +1074,8 @@ typedef struct xc_cpupoolinfo {
     uint32_t n_dom;
     xc_cpumap_t cpumap;
 } xc_cpupoolinfo_t;
+
+#define XC_CPUPOOL_POOLID_ANY 0xFFFFFFFF
 
 /**
  * Create a new cpupool.
@@ -1435,6 +1460,9 @@ int xc_lockprof_query(xc_interface *xch,
 void *xc_memalign(xc_interface *xch, size_t alignment, size_t size);
 
 /**
+ * Avoid using this function, as it does not work for all cases (such
+ * as 4M superpages, or guests using PSE36). Only used for debugging.
+ *
  * Translates a virtual address in the context of a given domain and
  * vcpu returning the GFN containing the address (that is, an MFN for 
  * PV guests, a PFN for HVM guests).  Returns 0 for failure.
@@ -1592,59 +1620,6 @@ int xc_physdev_unmap_pirq(xc_interface *xch,
                           int domid,
                           int pirq);
 
-int xc_hvm_set_pci_intx_level(
-    xc_interface *xch, domid_t dom,
-    uint16_t domain, uint8_t bus, uint8_t device, uint8_t intx,
-    unsigned int level);
-int xc_hvm_set_isa_irq_level(
-    xc_interface *xch, domid_t dom,
-    uint8_t isa_irq,
-    unsigned int level);
-
-int xc_hvm_set_pci_link_route(
-    xc_interface *xch, domid_t dom, uint8_t link, uint8_t isa_irq);
-
-int xc_hvm_inject_msi(
-    xc_interface *xch, domid_t dom, uint64_t addr, uint32_t data);
-
-/*
- * Track dirty bit changes in the VRAM area
- *
- * All of this is done atomically:
- * - get the dirty bitmap since the last call
- * - set up dirty tracking area for period up to the next call
- * - clear the dirty tracking area.
- *
- * Returns -ENODATA and does not fill bitmap if the area has changed since the
- * last call.
- */
-int xc_hvm_track_dirty_vram(
-    xc_interface *xch, domid_t dom,
-    uint64_t first_pfn, uint32_t nr,
-    unsigned long *bitmap);
-
-/*
- * Notify that some pages got modified by the Device Model
- */
-int xc_hvm_modified_memory(
-    xc_interface *xch, domid_t dom, uint64_t first_pfn, uint32_t nr);
-
-/*
- * Set a range of memory to a specific type.
- * Allowed types are HVMMEM_ram_rw, HVMMEM_ram_ro, HVMMEM_mmio_dm
- */
-int xc_hvm_set_mem_type(
-    xc_interface *xch, domid_t dom, hvmmem_type_t memtype, uint64_t first_pfn, uint32_t nr);
-
-/*
- * Injects a hardware/software CPU trap, to take effect the next time the HVM 
- * resumes. 
- */
-int xc_hvm_inject_trap(
-    xc_interface *xch, domid_t dom, int vcpu, uint8_t vector,
-    uint8_t type, uint32_t error_code, uint8_t insn_len,
-    uint64_t cr2);
-
 /*
  *  LOGGING AND ERROR REPORTING
  */
@@ -1688,150 +1663,6 @@ int xc_hvm_param_get(xc_interface *handle, domid_t dom, uint32_t param, uint64_t
 /* Deprecated: use xc_hvm_param_set/get() instead. */
 int xc_set_hvm_param(xc_interface *handle, domid_t dom, int param, unsigned long value);
 int xc_get_hvm_param(xc_interface *handle, domid_t dom, int param, unsigned long *value);
-
-/*
- * IOREQ Server API. (See section on IOREQ Servers in public/hvm_op.h).
- */
-
-/**
- * This function instantiates an IOREQ Server.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm handle_bufioreq how should the IOREQ Server handle buffered requests
- *                       (HVM_IOREQSRV_BUFIOREQ_*)?
- * @parm id pointer to an ioservid_t to receive the IOREQ Server id.
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_create_ioreq_server(xc_interface *xch,
-                               domid_t domid,
-                               int handle_bufioreq,
-                               ioservid_t *id);
-
-/**
- * This function retrieves the necessary information to allow an
- * emulator to use an IOREQ Server.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm ioreq_pfn pointer to a xen_pfn_t to receive the synchronous ioreq gmfn
- * @parm bufioreq_pfn pointer to a xen_pfn_t to receive the buffered ioreq gmfn
- * @parm bufioreq_port pointer to a evtchn_port_t to receive the buffered ioreq event channel
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_get_ioreq_server_info(xc_interface *xch,
-                                 domid_t domid,
-                                 ioservid_t id,
-                                 xen_pfn_t *ioreq_pfn,
-                                 xen_pfn_t *bufioreq_pfn,
-                                 evtchn_port_t *bufioreq_port);
-
-/**
- * This function sets IOREQ Server state. An IOREQ Server
- * will not be passed emulation requests until it is in
- * the enabled state.
- * Note that the contents of the ioreq_pfn and bufioreq_pfn are
- * not meaningful until the IOREQ Server is in the enabled state.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm enabled the state.
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_set_ioreq_server_state(xc_interface *xch,
-                                  domid_t domid,
-                                  ioservid_t id,
-                                  int enabled);
-
-/**
- * This function registers a range of memory or I/O ports for emulation.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm is_mmio is this a range of ports or memory
- * @parm start start of range
- * @parm end end of range (inclusive).
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_map_io_range_to_ioreq_server(xc_interface *xch,
-                                        domid_t domid,
-                                        ioservid_t id,
-                                        int is_mmio,
-                                        uint64_t start,
-                                        uint64_t end);
-
-/**
- * This function deregisters a range of memory or I/O ports for emulation.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm is_mmio is this a range of ports or memory
- * @parm start start of range
- * @parm end end of range (inclusive).
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_unmap_io_range_from_ioreq_server(xc_interface *xch,
-                                            domid_t domid,
-                                            ioservid_t id,
-                                            int is_mmio,
-                                            uint64_t start,
-                                            uint64_t end);
-
-/**
- * This function registers a PCI device for config space emulation.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm segment the PCI segment of the device
- * @parm bus the PCI bus of the device
- * @parm device the 'slot' number of the device
- * @parm function the function number of the device
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_map_pcidev_to_ioreq_server(xc_interface *xch,
-                                      domid_t domid,
-                                      ioservid_t id,
-                                      uint16_t segment,
-                                      uint8_t bus,
-                                      uint8_t device,
-                                      uint8_t function);
-
-/**
- * This function deregisters a PCI device for config space emulation.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @parm segment the PCI segment of the device
- * @parm bus the PCI bus of the device
- * @parm device the 'slot' number of the device
- * @parm function the function number of the device
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_unmap_pcidev_from_ioreq_server(xc_interface *xch,
-                                          domid_t domid,
-                                          ioservid_t id,
-                                          uint16_t segment,
-                                          uint8_t bus,
-                                          uint8_t device,
-                                          uint8_t function);
-
-/**
- * This function destroys an IOREQ Server.
- *
- * @parm xch a handle to an open hypervisor interface.
- * @parm domid the domain id to be serviced
- * @parm id the IOREQ Server id.
- * @return 0 on success, -1 on failure.
- */
-int xc_hvm_destroy_ioreq_server(xc_interface *xch,
-                                domid_t domid,
-                                ioservid_t id);
 
 /* HVM guest pass-through */
 int xc_assign_device(xc_interface *xch,
@@ -2073,7 +1904,7 @@ int xc_tmem_control_oid(xc_interface *xch, int32_t pool_id, uint32_t subop,
 int xc_tmem_control(xc_interface *xch,
                     int32_t pool_id, uint32_t subop, uint32_t cli_id,
                     uint32_t len, uint32_t arg, void *buf);
-int xc_tmem_auth(xc_interface *xch, int cli_id, char *uuid_str, int arg1);
+int xc_tmem_auth(xc_interface *xch, int cli_id, char *uuid_str, int enable);
 int xc_tmem_save(xc_interface *xch, int dom, int live, int fd, int field_marker);
 int xc_tmem_save_extra(xc_interface *xch, int dom, int fd, int field_marker);
 void xc_tmem_save_done(xc_interface *xch, int dom);
@@ -2179,6 +2010,8 @@ int xc_monitor_mov_to_msr(xc_interface *xch, domid_t domain_id, uint32_t msr,
 int xc_monitor_singlestep(xc_interface *xch, domid_t domain_id, bool enable);
 int xc_monitor_software_breakpoint(xc_interface *xch, domid_t domain_id,
                                    bool enable);
+int xc_monitor_descriptor_access(xc_interface *xch, domid_t domain_id,
+                                 bool enable);
 int xc_monitor_guest_request(xc_interface *xch, domid_t domain_id,
                              bool enable, bool sync);
 int xc_monitor_debug_exceptions(xc_interface *xch, domid_t domain_id,

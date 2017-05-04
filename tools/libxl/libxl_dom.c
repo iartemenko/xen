@@ -214,6 +214,7 @@ static int hvm_set_viridian_features(libxl__gc *gc, uint32_t domid,
         libxl_bitmap_set(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_FREQ);
         libxl_bitmap_set(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_TIME_REF_COUNT);
         libxl_bitmap_set(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_APIC_ASSIST);
+        libxl_bitmap_set(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_CRASH_CTL);
     }
 
     libxl_for_each_set_bit(v, info->u.hvm.viridian_enable) {
@@ -259,6 +260,9 @@ static int hvm_set_viridian_features(libxl__gc *gc, uint32_t domid,
     if (libxl_bitmap_test(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_APIC_ASSIST))
         mask |= HVMPV_apic_assist;
 
+    if (libxl_bitmap_test(&enlightenments, LIBXL_VIRIDIAN_ENLIGHTENMENT_CRASH_CTL))
+        mask |= HVMPV_crash_ctl;
+
     if (mask != 0 &&
         xc_hvm_param_set(CTX->xch,
                          domid,
@@ -291,8 +295,6 @@ static void hvm_set_conf_params(xc_interface *handle, uint32_t domid,
                     libxl_defbool_val(info->u.hvm.vpt_align));
     xc_hvm_param_set(handle, domid, HVM_PARAM_NESTEDHVM,
                     libxl_defbool_val(info->u.hvm.nested_hvm));
-    xc_hvm_param_set(handle, domid, HVM_PARAM_ALTP2M,
-                    libxl_defbool_val(info->u.hvm.altp2m));
 }
 
 int libxl__build_pre(libxl__gc *gc, uint32_t domid,
@@ -439,6 +441,22 @@ int libxl__build_pre(libxl__gc *gc, uint32_t domid,
         if (rc)
             return rc;
 #endif
+    }
+
+    /* Alternate p2m support on x86 is available only for HVM guests. */
+    if (info->type == LIBXL_DOMAIN_TYPE_HVM) {
+        /* The config parameter "altp2m" replaces the parameter "altp2mhvm". For
+         * legacy reasons, both parameters are accepted on x86 HVM guests.
+         *
+         * If the legacy field info->u.hvm.altp2m is set, activate altp2m.
+         * Otherwise set altp2m based on the field info->altp2m. */
+        if (info->altp2m == LIBXL_ALTP2M_MODE_DISABLED &&
+            libxl_defbool_val(info->u.hvm.altp2m))
+            xc_hvm_param_set(ctx->xch, domid, HVM_PARAM_ALTP2M,
+                             libxl_defbool_val(info->u.hvm.altp2m));
+        else
+            xc_hvm_param_set(ctx->xch, domid, HVM_PARAM_ALTP2M,
+                             info->altp2m);
     }
 
     rc = libxl__arch_domain_create(gc, d_config, domid);
@@ -690,7 +708,6 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
         return ERROR_FAIL;
     }
 
-    dom->pvh_enabled = state->pvh_enabled;
     dom->container_type = XC_DOM_PV_CONTAINER;
 
     LOG(DEBUG, "pv kernel mapped %d path %s", state->pv_kernel.mapped, state->pv_kernel.path);
@@ -768,7 +785,7 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
     if (ret != 0)
         goto out;
 
-    if (xc_dom_feature_translated(dom)) {
+    if (xc_dom_translated(dom)) {
         state->console_mfn = dom->console_pfn;
         state->store_mfn = dom->xenstore_pfn;
     } else {

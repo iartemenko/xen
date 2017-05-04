@@ -306,6 +306,12 @@ extern uint8_t posted_intr_vector;
 #define INVVPID_ALL_CONTEXT                     2
 #define INVVPID_SINGLE_CONTEXT_RETAINING_GLOBAL 3
 
+#ifdef HAVE_GAS_VMX
+# define GAS_VMX_OP(yes, no) yes
+#else
+# define GAS_VMX_OP(yes, no) no
+#endif
+
 static always_inline void __vmptrld(u64 addr)
 {
     asm volatile (
@@ -395,32 +401,50 @@ static always_inline void __vmwrite(unsigned long field, unsigned long value)
         );
 }
 
-static inline bool_t __vmread_safe(unsigned long field, unsigned long *value)
+static inline enum vmx_insn_errno vmread_safe(unsigned long field,
+                                              unsigned long *value)
 {
-    bool_t okay;
+    unsigned long ret = VMX_INSN_SUCCEED;
+    bool fail_invalid, fail_valid;
 
-    asm volatile (
-#ifdef HAVE_GAS_VMX
-                   "vmread %2, %1\n\t"
-#else
-                   VMREAD_OPCODE MODRM_EAX_ECX
-#endif
-                   /* CF==1 or ZF==1 --> rc = 0 */
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-                   : "=@ccnbe" (okay),
-#else
-                   "setnbe %0"
-                   : "=qm" (okay),
-#endif
-#ifdef HAVE_GAS_VMX
-                     "=rm" (*value)
-                   : "r" (field));
-#else
-                     "=c" (*value)
-                   : "a" (field));
-#endif
+    asm volatile ( GAS_VMX_OP("vmread %[field], %[value]\n\t",
+                              VMREAD_OPCODE MODRM_EAX_ECX)
+                   ASM_FLAG_OUT(, "setc %[invalid]\n\t")
+                   ASM_FLAG_OUT(, "setz %[valid]\n\t")
+                   : ASM_FLAG_OUT("=@ccc", [invalid] "=rm") (fail_invalid),
+                     ASM_FLAG_OUT("=@ccz", [valid] "=rm") (fail_valid),
+                     [value] GAS_VMX_OP("=rm", "=c") (*value)
+                   : [field] GAS_VMX_OP("r", "a") (field));
 
-    return okay;
+    if ( unlikely(fail_invalid) )
+        ret = VMX_INSN_FAIL_INVALID;
+    else if ( unlikely(fail_valid) )
+        __vmread(VM_INSTRUCTION_ERROR, &ret);
+
+    return ret;
+}
+
+static inline enum vmx_insn_errno vmwrite_safe(unsigned long field,
+                                               unsigned long value)
+{
+    unsigned long ret = VMX_INSN_SUCCEED;
+    bool fail_invalid, fail_valid;
+
+    asm volatile ( GAS_VMX_OP("vmwrite %[value], %[field]\n\t",
+                              VMWRITE_OPCODE MODRM_EAX_ECX)
+                   ASM_FLAG_OUT(, "setc %[invalid]\n\t")
+                   ASM_FLAG_OUT(, "setz %[valid]\n\t")
+                   : ASM_FLAG_OUT("=@ccc", [invalid] "=rm") (fail_invalid),
+                     ASM_FLAG_OUT("=@ccz", [valid] "=rm") (fail_valid)
+                   : [field] GAS_VMX_OP("r", "a") (field),
+                     [value] GAS_VMX_OP("rm", "c") (value));
+
+    if ( unlikely(fail_invalid) )
+        ret = VMX_INSN_FAIL_INVALID;
+    else if ( unlikely(fail_valid) )
+        __vmread(VM_INSTRUCTION_ERROR, &ret);
+
+    return ret;
 }
 
 static always_inline void __invept(unsigned long type, u64 eptp, u64 gpa)
@@ -573,27 +597,24 @@ void free_p2m_hap_data(struct p2m_domain *p2m);
 void p2m_init_hap_data(struct p2m_domain *p2m);
 
 void vmx_pi_per_cpu_init(unsigned int cpu);
+void vmx_pi_desc_fixup(unsigned int cpu);
 
 void vmx_pi_hooks_assign(struct domain *d);
 void vmx_pi_hooks_deassign(struct domain *d);
 
+#define APIC_INVALID_DEST           0xffffffff
+
 /* EPT violation qualifications definitions */
-#define _EPT_READ_VIOLATION         0
-#define EPT_READ_VIOLATION          (1UL<<_EPT_READ_VIOLATION)
-#define _EPT_WRITE_VIOLATION        1
-#define EPT_WRITE_VIOLATION         (1UL<<_EPT_WRITE_VIOLATION)
-#define _EPT_EXEC_VIOLATION         2
-#define EPT_EXEC_VIOLATION          (1UL<<_EPT_EXEC_VIOLATION)
-#define _EPT_EFFECTIVE_READ         3
-#define EPT_EFFECTIVE_READ          (1UL<<_EPT_EFFECTIVE_READ)
-#define _EPT_EFFECTIVE_WRITE        4
-#define EPT_EFFECTIVE_WRITE         (1UL<<_EPT_EFFECTIVE_WRITE)
-#define _EPT_EFFECTIVE_EXEC         5
-#define EPT_EFFECTIVE_EXEC          (1UL<<_EPT_EFFECTIVE_EXEC)
-#define _EPT_GLA_VALID              7
-#define EPT_GLA_VALID               (1UL<<_EPT_GLA_VALID)
-#define _EPT_GLA_FAULT              8
-#define EPT_GLA_FAULT               (1UL<<_EPT_GLA_FAULT)
+typedef union ept_qual {
+    unsigned long raw;
+    struct {
+        bool read:1, write:1, fetch:1,
+            eff_read:1, eff_write:1, eff_exec:1, /* eff_user_exec */:1,
+            gla_valid:1,
+            gla_fault:1; /* Valid iff gla_valid. */
+        unsigned long /* pad */:55;
+    };
+} __transparent__ ept_qual_t;
 
 #define EPT_L4_PAGETABLE_SHIFT      39
 #define EPT_PAGETABLE_ENTRIES       512
@@ -607,5 +628,47 @@ typedef struct {
     u64 gpa;
     u16 eptp_index;
 } ve_info_t;
+
+/* VM-Exit instruction info for LIDT, LGDT, SIDT, SGDT */
+typedef union idt_or_gdt_instr_info {
+    unsigned long raw;
+    struct {
+        unsigned long scaling   :2,  /* bits 0:1 - Scaling */
+                                :5,  /* bits 6:2 - Undefined */
+        addr_size               :3,  /* bits 9:7 - Address size */
+                                :1,  /* bit 10 - Cleared to 0 */
+        operand_size            :1,  /* bit 11 - Operand size */
+                                :3,  /* bits 14:12 - Undefined */
+        segment_reg             :3,  /* bits 17:15 - Segment register */
+        index_reg               :4,  /* bits 21:18 - Index register */
+        index_reg_invalid       :1,  /* bit 22 - Index register invalid */
+        base_reg                :4,  /* bits 26:23 - Base register */
+        base_reg_invalid        :1,  /* bit 27 - Base register invalid */
+        instr_identity          :1,  /* bit 28 - 0:GDT, 1:IDT */
+        instr_write             :1,  /* bit 29 - 0:store, 1:load */
+                                :34; /* bits 30:63 - Undefined */
+    };
+} idt_or_gdt_instr_info_t;
+
+/* VM-Exit instruction info for LLDT, LTR, SLDT, STR */
+typedef union ldt_or_tr_instr_info {
+    unsigned long raw;
+    struct {
+        unsigned long scaling   :2,  /* bits 0:1 - Scaling */
+                                :1,  /* bit 2 - Undefined */
+        reg1                    :4,  /* bits 6:3 - Reg1 */
+        addr_size               :3,  /* bits 9:7 - Address size */
+        mem_reg                 :1,  /* bit 10 - Mem/Reg */
+                                :4,  /* bits 14:11 - Undefined */
+        segment_reg             :3,  /* bits 17:15 - Segment register */
+        index_reg               :4,  /* bits 21:18 - Index register */
+        index_reg_invalid       :1,  /* bit 22 - Index register invalid */
+        base_reg                :4,  /* bits 26:23 - Base register */
+        base_reg_invalid        :1,  /* bit 27 - Base register invalid */
+        instr_identity          :1,  /* bit 28 - 0:LDT, 1:TR */
+        instr_write             :1,  /* bit 29 - 0:store, 1:load */
+                                :34; /* bits 31:63 - Undefined */
+    };
+} ldt_or_tr_instr_info_t;
 
 #endif /* __ASM_X86_HVM_VMX_VMX_H__ */

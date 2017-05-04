@@ -237,13 +237,26 @@ struct xen_dm_op_set_pci_link_route {
  * XEN_DMOP_modified_memory: Notify that a set of pages were modified by
  *                           an emulator.
  *
- * NOTE: In the event of a continuation, the @first_pfn is set to the
- *       value of the pfn of the remaining set of pages and @nr reduced
- *       to the size of the remaining set.
+ * DMOP buf 1 contains an array of xen_dm_op_modified_memory_extent with
+ * @nr_extents entries.
+ *
+ * On error, @nr_extents will contain the index+1 of the extent that
+ * had the error.  It is not defined if or which pages may have been
+ * marked as dirty, in this event.
  */
 #define XEN_DMOP_modified_memory 11
 
 struct xen_dm_op_modified_memory {
+    /*
+     * IN - Number of extents to be processed
+     * OUT -returns n+1 for failing extent
+     */
+    uint32_t nr_extents;
+    /* IN/OUT - Must be set to 0 */
+    uint32_t opaque;
+};
+
+struct xen_dm_op_modified_memory_extent {
     /* IN - number of contiguous pages modified */
     uint32_t nr;
     uint32_t pad;
@@ -318,6 +331,32 @@ struct xen_dm_op_inject_msi {
     uint64_aligned_t addr;
 };
 
+/*
+ * XEN_DMOP_map_mem_type_to_ioreq_server : map or unmap the IOREQ Server <id>
+ *                                      to specific memory type <type>
+ *                                      for specific accesses <flags>
+ *
+ * For now, flags only accept the value of XEN_DMOP_IOREQ_MEM_ACCESS_WRITE,
+ * which means only write operations are to be forwarded to an ioreq server.
+ * Support for the emulation of read operations can be added when an ioreq
+ * server has such requirement in future.
+ */
+#define XEN_DMOP_map_mem_type_to_ioreq_server 15
+
+struct xen_dm_op_map_mem_type_to_ioreq_server {
+    ioservid_t id;      /* IN - ioreq server id */
+    uint16_t type;      /* IN - memory type */
+    uint32_t flags;     /* IN - types of accesses to be forwarded to the
+                           ioreq server. flags with 0 means to unmap the
+                           ioreq server */
+
+#define XEN_DMOP_IOREQ_MEM_ACCESS_READ (1u << 0)
+#define XEN_DMOP_IOREQ_MEM_ACCESS_WRITE (1u << 1)
+
+    uint64_t opaque;    /* IN/OUT - only used for hypercall continuation,
+                           has to be set to zero by the caller */
+};
+
 struct xen_dm_op {
     uint32_t op;
     uint32_t pad;
@@ -336,6 +375,8 @@ struct xen_dm_op {
         struct xen_dm_op_set_mem_type set_mem_type;
         struct xen_dm_op_inject_event inject_event;
         struct xen_dm_op_inject_msi inject_msi;
+        struct xen_dm_op_map_mem_type_to_ioreq_server
+                map_mem_type_to_ioreq_server;
     } u;
 };
 

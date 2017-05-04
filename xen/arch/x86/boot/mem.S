@@ -1,7 +1,7 @@
         .code16
 
 #define SMAP    0x534d4150
-#define E820MAX 128
+#define E820_BIOS_MAX 128
 
 get_memory_map:
 
@@ -23,7 +23,7 @@ get_memory_map:
         jne     .Lmem88
 
         movb    bootsym(e820nr),%al             # up to 128 entries
-        cmpb    $E820MAX,%al
+        cmpb    $E820_BIOS_MAX,%al
         jae     .Lmem88
 
         incb    bootsym(e820nr)
@@ -67,10 +67,27 @@ get_memory_map:
 
         ret
 
+/*
+ * Copy E820 map obtained from BIOS to a buffer allocated by Xen.
+ * Input: %rdi: target address of e820 entry array
+ *        %esi: maximum number of entries to copy
+ * Output: %eax: number of entries copied
+ */
+        .code64
+ENTRY(e820map_copy)
+        mov     %esi, %eax
+        lea     e820map(%rip), %rsi
+        mov     e820nr(%rip), %ecx
+        cmp     %ecx, %eax
+        cmova   %ecx, %eax                      # number of entries to move
+        imul    $5, %eax, %ecx
+        rep movsl                               # do the move
+        ret
+
         .align  4
-GLOBAL(e820map)
-        .fill   E820MAX*20,1,0
-GLOBAL(e820nr)
+e820map:
+        .fill   E820_BIOS_MAX*20,1,0
+e820nr:
         .long   0
 GLOBAL(lowmem_kb)
         .long   0

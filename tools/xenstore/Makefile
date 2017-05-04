@@ -23,7 +23,9 @@ LDFLAGS += $(LDFLAGS-y)
 CLIENTS := xenstore-exists xenstore-list xenstore-read xenstore-rm xenstore-chmod
 CLIENTS += xenstore-write xenstore-ls xenstore-watch
 
-XENSTORED_OBJS = xenstored_core.o xenstored_watch.o xenstored_domain.o xenstored_transaction.o xs_lib.o talloc.o utils.o tdb.o hashtable.o
+XENSTORED_OBJS = xenstored_core.o xenstored_watch.o xenstored_domain.o
+XENSTORED_OBJS += xenstored_transaction.o xenstored_control.o
+XENSTORED_OBJS += xs_lib.o talloc.o utils.o tdb.o hashtable.o
 
 XENSTORED_OBJS_$(CONFIG_Linux) = xenstored_posix.o
 XENSTORED_OBJS_$(CONFIG_SunOS) = xenstored_solaris.o xenstored_posix.o xenstored_probes.o
@@ -32,6 +34,7 @@ XENSTORED_OBJS_$(CONFIG_FreeBSD) = xenstored_posix.o
 XENSTORED_OBJS_$(CONFIG_MiniOS) = xenstored_minios.o
 
 XENSTORED_OBJS += $(XENSTORED_OBJS_y)
+LDLIBS_xenstored += -lrt
 
 ifneq ($(XENSTORE_STATIC_CLIENTS),y)
 LIBXENSTORE := libxenstore.so
@@ -73,7 +76,7 @@ endif
 $(XENSTORED_OBJS): CFLAGS += $(CFLAGS_libxengnttab)
 
 xenstored: $(XENSTORED_OBJS)
-	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxenctrl) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
+	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxenctrl) $(LDLIBS_xenstored) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
 
 xenstored.a: $(XENSTORED_OBJS)
 	$(AR) cr $@ $^
@@ -103,12 +106,32 @@ libxenstore.so.$(MAJOR).$(MINOR): xs.opic xs_lib.opic
 libxenstore.a: xs.o xs_lib.o
 	$(AR) rcs $@ $^
 
+PKG_CONFIG := xenstore.pc
+PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
+
+ifneq ($(CONFIG_LIBXC_MINIOS),y)
+PKG_CONFIG_INST := $(PKG_CONFIG)
+$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
+$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
+$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
+endif
+
+PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
+
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(XEN_XENSTORE)/include
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
+$(PKG_CONFIG_LOCAL): PKG_CONFIG_CFLAGS_LOCAL = $(CFLAGS_xeninclude)
+
+$(LIBXENSTORE): $(PKG_CONFIG_INST) $(PKG_CONFIG_LOCAL)
+
 .PHONY: clean
 clean:
 	rm -f *.a *.o *.opic *.so* xenstored_probes.h
 	rm -f xenstored xs_random xs_stress xs_crashme
 	rm -f xs_tdb_dump xenstore-control init-xenstore-domain
 	rm -f xenstore $(CLIENTS)
+	rm -f xenstore.pc
 	$(RM) $(DEPS)
 
 .PHONY: distclean
@@ -148,6 +171,7 @@ endif
 	$(INSTALL_DATA) include/compat/xs_lib.h $(DESTDIR)$(includedir)/xenstore-compat/xs_lib.h
 	ln -sf xenstore-compat/xs.h  $(DESTDIR)$(includedir)/xs.h
 	ln -sf xenstore-compat/xs_lib.h $(DESTDIR)$(includedir)/xs_lib.h
+	$(INSTALL_DATA) xenstore.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
 .PHONY: clients-install
 clients-install: clients

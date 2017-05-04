@@ -18,14 +18,26 @@ Use the x86 instruction emulator fuzzer as an example.
 2. run the following commands to build:
    $ cd tools/fuzz/x86_instruction_emulator
    $ make distclean
-   $ make CC=$AFLPATH/afl-gcc afl # produces afl-x86-insn-emulator-fuzzer
 
-3. provide initial test case:
+   If you have a new enough version of Clang/LLVM and have configured AFL's
+   llvm_mode, make use of afl-clang-fast:
+
+     $ make CC=$AFLPATH/afl-clang-fast afl # produces afl-harness
+
+   If not, use the default afl-gcc:
+
+     $ make CC=$AFLPATH/afl-gcc afl # produces afl-harness
+
+3. provide initial test case (fuzzer dependent, see afl-*.c):
    $ mkdir testcase_dir
-   $ echo -n -e '\xc3' > testcase_dir/ret.bin
+   $ dd if=/dev/urandom of=testcase_dir/rand.bin \
+       bs=`./afl-harness --min-input-size` count=1
+
+3a. use a tmpfs for findings_dir (Perf improvement and reduced disk load)
+   $ mkdir findings_dir
+   $ mount -t tmpfs -o size=512M tmpfs findings_dir
 
 4. run the fuzzer with AFL:
-   $ $AFLPATH/afl-fuzz -m none -t 1000 -i testcase_dir -o findings_dir -- \
-     ./afl-x86-insn-emulator-fuzzer @@
+   $ $AFLPATH/afl-fuzz -t 1000 -i testcase_dir -o findings_dir -- ./afl-harness
 
 Please see AFL documentation for more information.

@@ -43,6 +43,14 @@
 #define PKG "xen.lowlevel.xs"
 #define CLS "xs"
 
+#if PY_MAJOR_VERSION < 3
+/* Python 2 compatibility */
+#define PyLong_FromLong PyInt_FromLong
+#undef PyLong_Check
+#define PyLong_Check PyInt_Check
+#define PyLong_AsLong PyInt_AsLong
+#endif
+
 static PyObject *xs_error;
 
 /** Python wrapper round an xs handle.
@@ -103,7 +111,7 @@ static PyObject *xspy_read(XsHandle *self, PyObject *args)
     xsval = xs_read(xh, th, path, &xsval_n);
     Py_END_ALLOW_THREADS
     if (xsval) {
-        PyObject *val = PyString_FromStringAndSize(xsval, xsval_n);
+        PyObject *val = PyBytes_FromStringAndSize(xsval, xsval_n);
         free(xsval);
         return val;
     }
@@ -179,7 +187,11 @@ static PyObject *xspy_ls(XsHandle *self, PyObject *args)
         int i;
         PyObject *val = PyList_New(xsval_n);
         for (i = 0; i < xsval_n; i++)
-            PyList_SetItem(val, i, PyString_FromString(xsval[i]));
+#if PY_MAJOR_VERSION >= 3
+            PyList_SetItem(val, i, PyUnicode_FromString(xsval[i]));
+#else
+            PyList_SetItem(val, i, PyBytes_FromString(xsval[i]));
+#endif
         free(xsval);
         return val;
     }
@@ -550,7 +562,11 @@ static PyObject *xspy_transaction_start(XsHandle *self)
     }
 
     snprintf(thstr, sizeof(thstr), "%lX", (unsigned long)th);
-    return PyString_FromString(thstr);
+#if PY_MAJOR_VERSION >= 3
+    return PyUnicode_FromString(thstr);
+#else
+    return PyBytes_FromString(thstr);
+#endif
 }
 
 #define xspy_transaction_end_doc "\n"					\
@@ -773,7 +789,11 @@ static PyObject *xspy_get_domain_path(XsHandle *self, PyObject *args)
     Py_END_ALLOW_THREADS
 
     if (xsval) {
-        PyObject *val = PyString_FromString(xsval);
+#if PY_MAJOR_VERSION >= 3
+        PyObject *val = PyUnicode_FromString(xsval);
+#else
+        PyObject *val = PyBytes_FromString(xsval);
+#endif
         free(xsval);
         return val;
     }
@@ -870,11 +890,6 @@ static PyMethodDef xshandle_methods[] = {
     { NULL /* Sentinel. */ },
 };
 
-static PyObject *xshandle_getattr(PyObject *self, char *name)
-{
-    return Py_FindMethod(xshandle_methods, self, name);
-}
-
 static PyObject *
 xshandle_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
@@ -927,72 +942,75 @@ static void xshandle_dealloc(XsHandle *self)
 
     Py_XDECREF(self->watches);
 
-    self->ob_type->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 static PyTypeObject xshandle_type = {
+#if PY_MAJOR_VERSION >= 3
+    .ob_base = { PyObject_HEAD_INIT(NULL) },
+#else
     PyObject_HEAD_INIT(NULL)
-    0,
-    PKG "." CLS,
-    sizeof(XsHandle),
-    0,
-    (destructor)xshandle_dealloc, /* tp_dealloc        */
-    NULL,                         /* tp_print          */
-    xshandle_getattr,             /* tp_getattr        */
-    NULL,                         /* tp_setattr        */
-    NULL,                         /* tp_compare        */
-    NULL,                         /* tp_repr           */
-    NULL,                         /* tp_as_number      */
-    NULL,                         /* tp_as_sequence    */
-    NULL,                         /* tp_as_mapping     */
-    NULL,                         /* tp_hash           */
-    NULL,                         /* tp_call           */
-    NULL,                         /* tp_str            */
-    NULL,                         /* tp_getattro       */
-    NULL,                         /* tp_setattro       */
-    NULL,                         /* tp_as_buffer      */
-    Py_TPFLAGS_DEFAULT,           /* tp_flags          */
-    "Xenstore connections",       /* tp_doc            */
-    NULL,                         /* tp_traverse       */
-    NULL,                         /* tp_clear          */
-    NULL,                         /* tp_richcompare    */
-    0,                            /* tp_weaklistoffset */
-    NULL,                         /* tp_iter           */
-    NULL,                         /* tp_iternext       */
-    xshandle_methods,             /* tp_methods        */
-    NULL,                         /* tp_members        */
-    NULL,                         /* tp_getset         */
-    NULL,                         /* tp_base           */
-    NULL,                         /* tp_dict           */
-    NULL,                         /* tp_descr_get      */
-    NULL,                         /* tp_descr_set      */
-    0,                            /* tp_dictoffset     */
-    (initproc)xshandle_init,      /* tp_init           */
-    NULL,                         /* tp_alloc          */
-    xshandle_new,                 /* tp_new            */
+#endif
+    .tp_name = PKG "." CLS,
+    .tp_basicsize = sizeof(XsHandle),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor)xshandle_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Xenstore connections",
+    .tp_methods = xshandle_methods,
+    .tp_init = (initproc)xshandle_init,
+    .tp_new = xshandle_new,
 };
 
 static PyMethodDef xs_methods[] = { { NULL } };
 
+#if PY_MAJOR_VERSION >= 3
+static PyModuleDef xs_module = {
+    PyModuleDef_HEAD_INIT,
+    PKG,     /* name */
+    NULL,   /* docstring */
+    -1,     /* size of per-interpreter state, -1 means the module use global
+               variables */
+    xs_methods
+};
+#endif
+
+#if PY_MAJOR_VERSION >= 3
+#define INITERROR return NULL
+PyMODINIT_FUNC PyInit_xs(void)
+#else
+#define INITERROR return
 PyMODINIT_FUNC initxs(void)
+#endif
 {
     PyObject* m;
 
     if (PyType_Ready(&xshandle_type) < 0)
-        return;
+        INITERROR;
 
+#if PY_MAJOR_VERSION >= 3
+    m = PyModule_Create(&xs_module);
+#else
     m = Py_InitModule(PKG, xs_methods);
+#endif
 
     if (m == NULL)
-      return;
+        INITERROR;
 
     xs_error = PyErr_NewException(PKG ".Error", PyExc_RuntimeError, NULL);
+    if (xs_error == NULL) {
+        Py_DECREF(m);
+        INITERROR;
+    }
 
     Py_INCREF(&xshandle_type);
     PyModule_AddObject(m, CLS, (PyObject *)&xshandle_type);
 
     Py_INCREF(xs_error);
     PyModule_AddObject(m, "Error", xs_error);
+#if PY_MAJOR_VERSION >= 3
+    return m;
+#endif
 }
 
 

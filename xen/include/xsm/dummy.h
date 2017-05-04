@@ -555,10 +555,23 @@ static XSM_INLINE int xsm_hvm_param_altp2mhvm(XSM_DEFAULT_ARG struct domain *d)
     return xsm_default_action(action, current->domain, d);
 }
 
-static XSM_INLINE int xsm_hvm_altp2mhvm_op(XSM_DEFAULT_ARG struct domain *d)
+static XSM_INLINE int xsm_hvm_altp2mhvm_op(XSM_DEFAULT_ARG struct domain *d, uint64_t mode, uint32_t op)
 {
-    XSM_ASSERT_ACTION(XSM_TARGET);
-    return xsm_default_action(action, current->domain, d);
+    XSM_ASSERT_ACTION(XSM_OTHER);
+
+    switch ( mode )
+    {
+    case XEN_ALTP2M_mixed:
+        return xsm_default_action(XSM_TARGET, current->domain, d);
+    case XEN_ALTP2M_external:
+        return xsm_default_action(XSM_DM_PRIV, current->domain, d);
+    case XEN_ALTP2M_limited:
+        if ( HVMOP_altp2m_vcpu_enable_notify == op )
+            return xsm_default_action(XSM_TARGET, current->domain, d);
+        return xsm_default_action(XSM_DM_PRIV, current->domain, d);
+    default:
+        return -EPERM;
+    }
 }
 
 static XSM_INLINE int xsm_vm_event_control(XSM_DEFAULT_ARG struct domain *d, int mode, int op)
@@ -682,18 +695,13 @@ static XSM_INLINE int xsm_pmu_op (XSM_DEFAULT_ARG struct domain *d, unsigned int
     XSM_ASSERT_ACTION(XSM_OTHER);
     switch ( op )
     {
-    case XENPMU_mode_set:
-    case XENPMU_mode_get:
-    case XENPMU_feature_set:
-    case XENPMU_feature_get:
-        return xsm_default_action(XSM_PRIV, d, current->domain);
     case XENPMU_init:
     case XENPMU_finish:
     case XENPMU_lvtpc_set:
     case XENPMU_flush:
         return xsm_default_action(XSM_HOOK, d, current->domain);
     default:
-        return -EPERM;
+        return xsm_default_action(XSM_PRIV, d, current->domain);
     }
 }
 

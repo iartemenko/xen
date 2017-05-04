@@ -38,9 +38,6 @@ int libxl__domain_create_info_setdefault(libxl__gc *gc,
     if (c_info->type == LIBXL_DOMAIN_TYPE_HVM) {
         libxl_defbool_setdefault(&c_info->hap, true);
         libxl_defbool_setdefault(&c_info->oos, true);
-    } else {
-        libxl_defbool_setdefault(&c_info->pvh, false);
-        libxl_defbool_setdefault(&c_info->hap, libxl_defbool_val(c_info->pvh));
     }
 
     libxl_defbool_setdefault(&c_info->run_hotplug_scripts, true);
@@ -316,6 +313,7 @@ int libxl__domain_build_info_setdefault(libxl__gc *gc,
         libxl_defbool_setdefault(&b_info->u.hvm.acpi,               true);
         libxl_defbool_setdefault(&b_info->u.hvm.acpi_s3,            true);
         libxl_defbool_setdefault(&b_info->u.hvm.acpi_s4,            true);
+        libxl_defbool_setdefault(&b_info->u.hvm.acpi_laptop_slate,  false);
         libxl_defbool_setdefault(&b_info->u.hvm.nx,                 true);
         libxl_defbool_setdefault(&b_info->u.hvm.viridian,           false);
         libxl_defbool_setdefault(&b_info->u.hvm.hpet,               true);
@@ -461,6 +459,8 @@ int libxl__domain_build(libxl__gc *gc,
         localents[i++] = libxl_defbool_val(info->u.hvm.acpi_s3) ? "1" : "0";
         localents[i++] = "platform/acpi_s4";
         localents[i++] = libxl_defbool_val(info->u.hvm.acpi_s4) ? "1" : "0";
+        localents[i++] = "platform/acpi_laptop_slate";
+        localents[i++] = libxl_defbool_val(info->u.hvm.acpi_laptop_slate) ? "1" : "0";
         if (info->u.hvm.mmio_hole_memkb) {
             uint64_t max_ram_below_4g =
                 (1ULL << 32) - (info->u.hvm.mmio_hole_memkb << 10);
@@ -475,8 +475,6 @@ int libxl__domain_build(libxl__gc *gc,
 
         break;
     case LIBXL_DOMAIN_TYPE_PV:
-        state->pvh_enabled = libxl_defbool_val(d_config->c_info.pvh);
-
         ret = libxl__build_pv(gc, domid, info, state);
         if (ret)
             goto out;
@@ -536,14 +534,6 @@ int libxl__domain_make(libxl__gc *gc, libxl_domain_config *d_config,
         flags |= XEN_DOMCTL_CDF_hvm_guest;
         flags |= libxl_defbool_val(info->hap) ? XEN_DOMCTL_CDF_hap : 0;
         flags |= libxl_defbool_val(info->oos) ? 0 : XEN_DOMCTL_CDF_oos_off;
-    } else if (libxl_defbool_val(info->pvh)) {
-        flags |= XEN_DOMCTL_CDF_pvh_guest;
-        if (!libxl_defbool_val(info->hap)) {
-            LOGD(ERROR, *domid, "HAP must be on for PVH");
-            rc = ERROR_INVAL;
-            goto out;
-        }
-        flags |= XEN_DOMCTL_CDF_hap;
     }
 
     /* Ultimately, handle is an array of 16 uint8_t, same as uuid */
@@ -912,14 +902,16 @@ static void initiate_domain_create(libxl__egc *egc,
 
     if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM &&
         (libxl_defbool_val(d_config->b_info.u.hvm.nested_hvm) &&
-         libxl_defbool_val(d_config->b_info.u.hvm.altp2m))) {
+        (libxl_defbool_val(d_config->b_info.u.hvm.altp2m) ||
+        (d_config->b_info.altp2m != LIBXL_ALTP2M_MODE_DISABLED)))) {
         ret = ERROR_INVAL;
         LOGD(ERROR, domid, "nestedhvm and altp2mhvm cannot be used together");
         goto error_out;
     }
 
     if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM &&
-        libxl_defbool_val(d_config->b_info.u.hvm.altp2m) &&
+        (libxl_defbool_val(d_config->b_info.u.hvm.altp2m) ||
+        (d_config->b_info.altp2m != LIBXL_ALTP2M_MODE_DISABLED)) &&
         pod_enabled) {
         ret = ERROR_INVAL;
         LOGD(ERROR, domid, "Cannot enable PoD and ALTP2M at the same time");
@@ -1332,6 +1324,9 @@ static void domcreate_launch_dm(libxl__egc *egc, libxl__multidev *multidev,
         libxl__device_console_dispose(&console);
     }
 
+    for (i = 0; i < d_config->num_p9s; i++)
+        libxl__device_p9_add(gc, domid, &d_config->p9[i]);
+
     switch (d_config->c_info.type) {
     case LIBXL_DOMAIN_TYPE_HVM:
     {
@@ -1608,7 +1603,6 @@ static void domain_create_cb(libxl__egc *egc,
 static int do_domain_create(libxl_ctx *ctx, libxl_domain_config *d_config,
                             uint32_t *domid, int restore_fd, int send_back_fd,
                             const libxl_domain_restore_params *params,
-                            const char *colo_proxy_script,
                             const libxl_asyncop_how *ao_how,
                             const libxl_asyncprogress_how *aop_console_how)
 {
@@ -1632,7 +1626,18 @@ static int do_domain_create(libxl_ctx *ctx, libxl_domain_config *d_config,
     }
     cdcs->dcs.callback = domain_create_cb;
     cdcs->dcs.domid_soft_reset = INVALID_DOMID;
-    cdcs->dcs.colo_proxy_script = colo_proxy_script;
+
+    if (cdcs->dcs.restore_params.checkpointed_stream ==
+        LIBXL_CHECKPOINTED_STREAM_COLO) {
+        cdcs->dcs.colo_proxy_script =
+            cdcs->dcs.restore_params.colo_proxy_script;
+        cdcs->dcs.crs.cps.is_userspace_proxy =
+            libxl_defbool_val(cdcs->dcs.restore_params.userspace_colo_proxy);
+    } else {
+        cdcs->dcs.colo_proxy_script = NULL;
+        cdcs->dcs.crs.cps.is_userspace_proxy = false;
+    }
+
     libxl__ao_progress_gethow(&cdcs->dcs.aop_console_how, aop_console_how);
     cdcs->domid_out = domid;
 
@@ -1667,12 +1672,16 @@ static void domain_soft_reset_cb(libxl__egc *egc,
         goto error;
     }
 
-    savefile = GCSPRINTF(LIBXL_DEVICE_MODEL_SAVE_FILE".%d", dds->domid);
-    restorefile = GCSPRINTF(LIBXL_DEVICE_MODEL_RESTORE_FILE".%d", dds->domid);
-    rc = rename(savefile, restorefile);
-    if (rc) {
-        LOGD(ERROR, dds->domid, "failed to rename dm save file.");
-        goto error;
+    if (cdcs->dcs.guest_config->b_info.device_model_version !=
+        LIBXL_DEVICE_MODEL_VERSION_NONE) {
+        savefile = GCSPRINTF(LIBXL_DEVICE_MODEL_SAVE_FILE".%d", dds->domid);
+        restorefile = GCSPRINTF(LIBXL_DEVICE_MODEL_RESTORE_FILE".%d",
+                                dds->domid);
+        rc = rename(savefile, restorefile);
+        if (rc) {
+            LOGD(ERROR, dds->domid, "failed to rename dm save file.");
+            goto error;
+        }
     }
 
     initiate_domain_create(egc, &cdcs->dcs);
@@ -1695,7 +1704,8 @@ static int do_domain_soft_reset(libxl_ctx *ctx,
     libxl__domain_create_state *dcs;
     libxl__domain_build_state *state;
     libxl__domain_save_state *dss;
-    char *dom_path, *xs_store_mfn, *xs_console_mfn;
+    const char *console_tty, *xs_store_mfn, *xs_console_mfn;
+    char *dom_path;
     uint32_t domid_out;
     int rc;
 
@@ -1724,17 +1734,32 @@ static int do_domain_soft_reset(libxl_ctx *ctx,
         goto out;
     }
 
-    xs_store_mfn = xs_read(ctx->xsh, XBT_NULL,
-                           GCSPRINTF("%s/store/ring-ref", dom_path),
-                           NULL);
+    rc = libxl__xs_read_checked(gc, XBT_NULL,
+                                GCSPRINTF("%s/store/ring-ref", dom_path),
+                                &xs_store_mfn);
+    if (rc) {
+        LOGD(ERROR, domid_soft_reset, "failed to read store/ring-ref.");
+        goto out;
+    }
     state->store_mfn = xs_store_mfn ? atol(xs_store_mfn): 0;
-    free(xs_store_mfn);
 
-    xs_console_mfn = xs_read(ctx->xsh, XBT_NULL,
-                             GCSPRINTF("%s/console/ring-ref", dom_path),
-                             NULL);
+    rc = libxl__xs_read_checked(gc, XBT_NULL,
+                                GCSPRINTF("%s/console/ring-ref", dom_path),
+                                &xs_console_mfn);
+    if (rc) {
+        LOGD(ERROR, domid_soft_reset, "failed to read console/ring-ref.");
+        goto out;
+    }
     state->console_mfn = xs_console_mfn ? atol(xs_console_mfn): 0;
-    free(xs_console_mfn);
+
+    rc = libxl__xs_read_mandatory(gc, XBT_NULL,
+                                  GCSPRINTF("%s/console/tty", dom_path),
+                                  &console_tty);
+    if (rc) {
+        LOGD(ERROR, domid_soft_reset, "failed to read console/tty.");
+        goto out;
+    }
+    state->console_tty = libxl__strdup(gc, console_tty);
 
     dss->ao = ao;
     dss->domid = dss->dsps.domid = domid_soft_reset;
@@ -1820,7 +1845,7 @@ int libxl_domain_create_new(libxl_ctx *ctx, libxl_domain_config *d_config,
                             const libxl_asyncprogress_how *aop_console_how)
 {
     unset_disk_colo_restore(d_config);
-    return do_domain_create(ctx, d_config, domid, -1, -1, NULL, NULL,
+    return do_domain_create(ctx, d_config, domid, -1, -1, NULL,
                             ao_how, aop_console_how);
 }
 
@@ -1831,17 +1856,14 @@ int libxl_domain_create_restore(libxl_ctx *ctx, libxl_domain_config *d_config,
                                 const libxl_asyncop_how *ao_how,
                                 const libxl_asyncprogress_how *aop_console_how)
 {
-    char *colo_proxy_script = NULL;
-
     if (params->checkpointed_stream == LIBXL_CHECKPOINTED_STREAM_COLO) {
-        colo_proxy_script = params->colo_proxy_script;
         set_disk_colo_restore(d_config);
     } else {
         unset_disk_colo_restore(d_config);
     }
 
     return do_domain_create(ctx, d_config, domid, restore_fd, send_back_fd,
-                            params, colo_proxy_script, ao_how, aop_console_how);
+                            params, ao_how, aop_console_how);
 }
 
 int libxl_domain_soft_reset(libxl_ctx *ctx,

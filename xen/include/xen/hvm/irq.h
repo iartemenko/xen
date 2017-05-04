@@ -63,6 +63,7 @@ struct hvm_gmsi_info {
     uint32_t gvec;
     uint32_t gflags;
     int dest_vcpu_id; /* -1 :multi-dest, non-negative: dest_vcpu_id */
+    bool posted; /* directly deliver to guest via VT-d PI? */
 };
 
 struct hvm_girq_dpci_mapping {
@@ -76,13 +77,13 @@ struct hvm_girq_dpci_mapping {
 #define NR_ISAIRQS  16
 #define NR_LINK     4
 #if defined(CONFIG_X86)
-# define NR_HVM_IRQS VIOAPIC_NUM_PINS
+# define NR_HVM_DOMU_IRQS ARRAY_SIZE(((struct hvm_hw_vioapic *)0)->redirtbl)
 #endif
 
 /* Protected by domain's event_lock */
 struct hvm_irq_dpci {
     /* Guest IRQ to guest device/intx mapping. */
-    struct list_head girq[NR_HVM_IRQS];
+    struct list_head girq[NR_HVM_DOMU_IRQS];
     /* Record of mapped ISA IRQs */
     DECLARE_BITMAP(isairq_map, NR_ISAIRQS);
     /* Record of mapped Links */

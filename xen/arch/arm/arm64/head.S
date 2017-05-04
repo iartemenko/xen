@@ -20,7 +20,6 @@
  * GNU General Public License for more details.
  */
 
-#include <asm/config.h>
 #include <asm/page.h>
 #include <asm/asm_defns.h>
 #include <asm/early_printk.h>
@@ -65,7 +64,7 @@
  *  x23 - UART address
  *  x24 - cpuid
  *  x25 - identity map in place
- *  x26 -
+ *  x26 - skip_zero_bss
  *  x27 -
  *  x28 -
  *  x29 -
@@ -232,6 +231,10 @@ section_table:
         .long   0xe0500020       /* Characteristics (section flags) */
         .align  5
 real_start:
+        /* BSS should be zeroed when booting without EFI */
+        mov   x26, #0                /* x26 := skip_zero_bss */
+
+real_start_efi:
         msr   DAIFSet, 0xf           /* Disable all interrupts */
 
         /* Save the bootloader arguments in less-clobberable registers */
@@ -261,6 +264,8 @@ GLOBAL(init_secondary)
         sub   x20, x19, x0           /* x20 := phys-offset */
 
         mov   x22, #1                /* x22 := is_secondary_cpu */
+        /* Boot CPU already zero BSS so skip it on secondary CPUs. */
+        mov   x26, #1                /* X26 := skip_zero_bss */
 
 common_start:
         mov   x24, #0                /* x24 := CPU ID. Initialy zero until we
@@ -314,8 +319,8 @@ common_start:
 
 el2:    PRINT("- Xen starting at EL2 -\r\n")
 
-        /* Zero BSS On the boot CPU to avoid nasty surprises */
-        cbnz  x22, skip_bss
+        /* Zero BSS only when requested */
+        cbnz  x26, skip_bss
 
         PRINT("- Zero BSS -\r\n")
         ldr   x0, =__bss_start       /* Load start & end of bss */
@@ -544,19 +549,6 @@ paging:
         /* Use a virtual address to access the UART. */
         ldr   x23, =EARLY_UART_VIRTUAL_ADDRESS
 #endif
-
-        /* Map the DTB in the boot misc slot */
-        cbnz  x22, 1f                /* Only on boot CPU */
-
-        ldr   x4, =boot_second       /* x4 := vaddr (boot_second) */
-        lsr   x2, x21, #SECOND_SHIFT
-        lsl   x2, x2, #SECOND_SHIFT  /* x2 := 2MB-aligned paddr of DTB */
-        mov   x3, #PT_MEM            /* x2 := 2MB RAM incl. DTB */
-        orr   x2, x2, x3
-        ldr   x1, =BOOT_FDT_VIRT_START
-        lsr   x1, x1, #(SECOND_SHIFT - 3)   /* x4 := Slot for BOOT_FDT_VIRT_START */
-        str   x2, [x4, x1]           /* Map it in the early fdt slot */
-1:
 
         /*
          * Flush the TLB in case the 1:1 mapping happens to clash with
@@ -787,7 +779,16 @@ ENTRY(efi_xen_start)
         mov   x1, xzr
         mov   x2, xzr
         mov   x3, xzr
-        b     real_start
+        /*
+         * The EFI stub and Xen may share some information living in
+         * BSS. Don't zero BSS to avoid loosing them.
+         *
+         * Note that the EFI firmware has already zeroed BSS for us
+         * before jump into the stub.
+         */
+        mov   x26, #1               /* x26 := skip_zero_bss */
+
+        b     real_start_efi
 ENDPROC(efi_xen_start)
 
 /*

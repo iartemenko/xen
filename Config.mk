@@ -212,11 +212,6 @@ CFLAGS += -std=gnu99
 
 CFLAGS += -Wall -Wstrict-prototypes
 
-# Clang complains about macros that expand to 'if ( ( foo == bar ) ) ...'
-# and is over-zealous with the printf format lint
-# and is a bit too fierce about unused return values
-CFLAGS-$(clang) += -Wno-parentheses -Wno-format -Wno-unused-value
-
 $(call cc-option-add,HOSTCFLAGS,HOSTCC,-Wdeclaration-after-statement)
 $(call cc-option-add,CFLAGS,CC,-Wdeclaration-after-statement)
 $(call cc-option-add,CFLAGS,CC,-Wno-unused-but-set-variable)
@@ -272,9 +267,9 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 5734d486b6aa0b69a39b2c8d52b355400bcf2551
-QEMU_UPSTREAM_REVISION ?= master
-MINIOS_UPSTREAM_REVISION ?= 1e8e464febb32428c7651b0b585866e5ee5f786e
+OVMF_UPSTREAM_REVISION ?= 5920a9d16b1ab887c2858224316a98e961d71b05
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.9.0-rc1
+MINIOS_UPSTREAM_REVISION ?= xen-4.9.0-rc1.2
 # Tue Dec 13 15:02:02 2016 +0000
 # build: prepend OBJ_DIR to linker script
 
@@ -285,9 +280,9 @@ SEABIOS_UPSTREAM_REVISION ?= rel-1.10.0
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= b669e922b37b8957248798a5eb7aa96a666cd3fe
-# Mon Nov 14 17:19:46 2016 +0000
-# qemu: ioport_read, ioport_write: be defensive about 32-bit addresses
+QEMU_TRADITIONAL_REVISION ?= xen-4.9.0-rc1
+# Thu Mar 9 11:14:55 2017 +0000
+# cirrus/vnc: zap drop bitblit support from console code.
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

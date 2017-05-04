@@ -7,7 +7,7 @@
 #ifndef __XEN_CONFIG_H__
 #define __XEN_CONFIG_H__
 
-#include <generated/autoconf.h>
+#include <xen/kconfig.h>
 
 #ifndef __ASSEMBLY__
 #include <xen/compiler.h>
@@ -70,6 +70,7 @@
 #define __force
 #define __bitwise
 
+#define KB(_kb)     (_AC(_kb, ULL) << 10)
 #define MB(_mb)     (_AC(_mb, ULL) << 20)
 #define GB(_gb)     (_AC(_gb, ULL) << 30)
 

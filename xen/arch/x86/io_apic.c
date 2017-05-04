@@ -20,7 +20,6 @@
  *	Paul Diefenbaugh	:	Added full ACPI support
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/irq.h>
@@ -1485,8 +1484,7 @@ static int __init timer_irq_works(void)
 {
     unsigned long t1, flags;
 
-    t1 = pit0_ticks;
-    mb();
+    t1 = ACCESS_ONCE(pit0_ticks);
 
     local_save_flags(flags);
     local_irq_enable();
@@ -1501,8 +1499,7 @@ static int __init timer_irq_works(void)
      * might have cached one ExtINT interrupt.  Finally, at
      * least one tick may be lost due to delays.
      */
-    mb();
-    if (pit0_ticks - t1 > 4)
+    if ( (ACCESS_ONCE(pit0_ticks) - t1) > 4 )
         return 1;
 
     return 0;
@@ -2277,8 +2274,6 @@ static int ioapic_physbase_to_id(unsigned long physbase)
     return -EINVAL;
 }
 
-unsigned apic_gsi_base(int apic);
-
 static int apic_pin_2_gsi_irq(int apic, int pin)
 {
     int idx;
@@ -2289,7 +2284,7 @@ static int apic_pin_2_gsi_irq(int apic, int pin)
     idx = find_irq_entry(apic, pin, mp_INT);
 
     return idx >= 0 ? pin_2_irq(idx, apic, pin)
-                    : apic_gsi_base(apic) + pin;
+                    : io_apic_gsi_base(apic) + pin;
 }
 
 int ioapic_guest_read(unsigned long physbase, unsigned int reg, u32 *pval)

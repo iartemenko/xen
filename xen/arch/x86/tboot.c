@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -12,6 +11,7 @@
 #include <asm/processor.h>
 #include <asm/e820.h>
 #include <asm/tboot.h>
+#include <asm/setup.h>
 #include <crypto/vmac.h>
 
 /* tboot=<physical address of shared page> */
@@ -47,8 +47,6 @@ static uint64_t __initdata sinit_base, __initdata sinit_size;
 #define TXTCR_SINIT_SIZE            0x0278
 #define TXTCR_HEAP_BASE             0x0300
 #define TXTCR_HEAP_SIZE             0x0308
-
-extern char __init_begin[], __bss_start[], __bss_end[];
 
 #define SHA1_SIZE      20
 typedef uint8_t   sha1_hash_t[SHA1_SIZE];
@@ -188,7 +186,7 @@ static void update_pagetable_mac(vmac_ctx_t *ctx)
     {
         struct page_info *page = mfn_to_page(mfn);
 
-        if ( !mfn_valid(mfn) )
+        if ( !mfn_valid(_mfn(mfn)) )
             continue;
         if ( is_page_in_use(page) && !is_xen_heap_page(page) )
         {
@@ -280,9 +278,9 @@ static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
     {
         struct page_info *page = __mfn_to_page(mfn);
 
-        if ( !mfn_valid(mfn) )
+        if ( !mfn_valid(_mfn(mfn)) )
             continue;
-        if ( (mfn << PAGE_SHIFT) < __pa(&_end) )
+        if ( is_xen_fixed_mfn(mfn) )
             continue; /* skip Xen */
         if ( (mfn >= PFN_DOWN(g_tboot_shared->tboot_base - 3 * PAGE_SIZE))
              && (mfn < PFN_UP(g_tboot_shared->tboot_base
@@ -363,20 +361,22 @@ void tboot_shutdown(uint32_t shutdown_type)
     if ( shutdown_type == TB_SHUTDOWN_S3 )
     {
         /*
-         * Xen regions for tboot to MAC
+         * Xen regions for tboot to MAC. This needs to remain in sync with
+         * xen_in_range().
          */
         g_tboot_shared->num_mac_regions = 3;
         /* S3 resume code (and other real mode trampoline code) */
         g_tboot_shared->mac_regions[0].start = bootsym_phys(trampoline_start);
         g_tboot_shared->mac_regions[0].size = bootsym_phys(trampoline_end) -
                                               bootsym_phys(trampoline_start);
-        /* hypervisor code + data */
+        /* hypervisor .text + .rodata */
         g_tboot_shared->mac_regions[1].start = (uint64_t)__pa(&_stext);
-        g_tboot_shared->mac_regions[1].size = __pa(&__init_begin) -
+        g_tboot_shared->mac_regions[1].size = __pa(&__2M_rodata_end) -
                                               __pa(&_stext);
-        /* bss */
-        g_tboot_shared->mac_regions[2].start = (uint64_t)__pa(&__bss_start);
-        g_tboot_shared->mac_regions[2].size = __pa(&__bss_end) - __pa(&__bss_start);
+        /* hypervisor .data + .bss */
+        g_tboot_shared->mac_regions[2].start = (uint64_t)__pa(&__2M_rwdata_start);
+        g_tboot_shared->mac_regions[2].size = __pa(&__2M_rwdata_end) -
+                                              __pa(&__2M_rwdata_start);
 
         /*
          * MAC domains and other Xen memory

@@ -30,7 +30,7 @@ struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
                                             xentoollog_logger *dombuild_logger,
                                             unsigned open_flags)
 {
-    struct xc_interface_core xch_buf, *xch = &xch_buf;
+    struct xc_interface_core xch_buf = { 0 }, *xch = &xch_buf;
 
     xch->flags = open_flags;
     xch->dombuild_logger_file = 0;
@@ -64,13 +64,17 @@ struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
         goto err;
 
     xch->fmem = xenforeignmemory_open(xch->error_handler, 0);
+    if ( xch->fmem == NULL )
+        goto err;
 
-    if ( xch->xcall == NULL )
+    xch->dmod = xendevicemodel_open(xch->error_handler, 0);
+    if ( xch->dmod == NULL )
         goto err;
 
     return xch;
 
  err:
+    xenforeignmemory_close(xch->fmem);
     xencall_close(xch->xcall);
     xtl_logger_destroy(xch->error_handler_tofree);
     if (xch != &xch_buf) free(xch);
@@ -89,6 +93,9 @@ int xc_interface_close(xc_interface *xch)
 
     rc = xenforeignmemory_close(xch->fmem);
     if (rc) PERROR("Could not close foreign memory interface");
+
+    rc = xendevicemodel_close(xch->dmod);
+    if (rc) PERROR("Could not close device model interface");
 
     xtl_logger_destroy(xch->dombuild_logger_tofree);
     xtl_logger_destroy(xch->error_handler_tofree);
@@ -774,79 +781,6 @@ int xc_ffs64(uint64_t x)
 {
     uint32_t h = x>>32, l = x;
     return l ? xc_ffs32(l) : h ? xc_ffs32(h) + 32 : 0;
-}
-
-int do_dm_op(xc_interface *xch, domid_t domid, unsigned int nr_bufs, ...)
-{
-    int ret = -1;
-    struct  {
-        void *u;
-        void *h;
-    } *bounce;
-    DECLARE_HYPERCALL_BUFFER(xen_dm_op_buf_t, bufs);
-    va_list args;
-    unsigned int idx;
-
-    bounce = calloc(nr_bufs, sizeof(*bounce));
-    if ( bounce == NULL )
-        goto fail1;
-
-    bufs = xc_hypercall_buffer_alloc(xch, bufs, sizeof(*bufs) * nr_bufs);
-    if ( bufs == NULL )
-        goto fail2;
-
-    va_start(args, nr_bufs);
-    for ( idx = 0; idx < nr_bufs; idx++ )
-    {
-        void *u = va_arg(args, void *);
-        size_t size = va_arg(args, size_t);
-
-        bounce[idx].h = xencall_alloc_buffer(xch->xcall, size);
-        if ( bounce[idx].h == NULL )
-            break; /* Error path handled after va_end(). */
-
-        memcpy(bounce[idx].h, u, size);
-        bounce[idx].u = u;
-
-        set_xen_guest_handle_raw(bufs[idx].h, bounce[idx].h);
-        bufs[idx].size = size;
-    }
-    va_end(args);
-
-    if ( idx != nr_bufs )
-        goto fail3;
-
-    ret = xencall3(xch->xcall, __HYPERVISOR_dm_op,
-                   domid, nr_bufs, HYPERCALL_BUFFER_AS_ARG(bufs));
-    if ( ret < 0 )
-        goto fail4;
-
-    while ( idx-- != 0 )
-    {
-        memcpy(bounce[idx].u, bounce[idx].h, bufs[idx].size);
-        xencall_free_buffer(xch->xcall, bounce[idx].h);
-    }
-
-    xc_hypercall_buffer_free(xch, bufs);
-
-    free(bounce);
-
-    return 0;
-
- fail4:
-    idx = nr_bufs;
-
- fail3:
-    while ( idx-- != 0 )
-        xencall_free_buffer(xch->xcall, bounce[idx].h);
-
-    xc_hypercall_buffer_free(xch, bufs);
-
- fail2:
-    free(bounce);
-
- fail1:
-    return ret;
 }
 
 /*

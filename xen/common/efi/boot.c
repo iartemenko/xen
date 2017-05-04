@@ -38,6 +38,8 @@
   { 0xf2fd1544, 0x9794, 0x4a2c, {0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94} }
 #define SHIM_LOCK_PROTOCOL_GUID \
   { 0x605dab50, 0xe046, 0x4300, {0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23} }
+#define APPLE_PROPERTIES_PROTOCOL_GUID \
+  { 0x91bd12fe, 0xf6c3, 0x44fb, { 0xa5, 0xb7, 0x51, 0x22, 0xab, 0x30, 0x3a, 0xe0} }
 
 typedef EFI_STATUS
 (/* _not_ EFIAPI */ *EFI_SHIM_LOCK_VERIFY) (
@@ -47,6 +49,44 @@ typedef EFI_STATUS
 typedef struct {
     EFI_SHIM_LOCK_VERIFY Verify;
 } EFI_SHIM_LOCK_PROTOCOL;
+
+struct _EFI_APPLE_PROPERTIES;
+
+typedef EFI_STATUS
+(EFIAPI *EFI_APPLE_PROPERTIES_GET) (
+    IN struct _EFI_APPLE_PROPERTIES *This,
+    IN const EFI_DEVICE_PATH *Device,
+    IN const CHAR16 *PropertyName,
+    OUT VOID *Buffer,
+    IN OUT UINT32 *BufferSize);
+
+typedef EFI_STATUS
+(EFIAPI *EFI_APPLE_PROPERTIES_SET) (
+    IN struct _EFI_APPLE_PROPERTIES *This,
+    IN const EFI_DEVICE_PATH *Device,
+    IN const CHAR16 *PropertyName,
+    IN const VOID *Value,
+    IN UINT32 ValueLen);
+
+typedef EFI_STATUS
+(EFIAPI *EFI_APPLE_PROPERTIES_DELETE) (
+    IN struct _EFI_APPLE_PROPERTIES *This,
+    IN const EFI_DEVICE_PATH *Device,
+    IN const CHAR16 *PropertyName);
+
+typedef EFI_STATUS
+(EFIAPI *EFI_APPLE_PROPERTIES_GETALL) (
+    IN struct _EFI_APPLE_PROPERTIES *This,
+    OUT VOID *Buffer,
+    IN OUT UINT32 *BufferSize);
+
+typedef struct _EFI_APPLE_PROPERTIES {
+    UINTN Version; /* 0x10000 */
+    EFI_APPLE_PROPERTIES_GET Get;
+    EFI_APPLE_PROPERTIES_SET Set;
+    EFI_APPLE_PROPERTIES_DELETE Delete;
+    EFI_APPLE_PROPERTIES_GETALL GetAll;
+} EFI_APPLE_PROPERTIES;
 
 union string {
     CHAR16 *w;
@@ -79,6 +119,17 @@ static size_t wstrlen(const CHAR16 * s);
 static int set_color(u32 mask, int bpp, u8 *pos, u8 *sz);
 static bool_t match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2);
 
+static void efi_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
+static void efi_console_set_mode(void);
+static EFI_GRAPHICS_OUTPUT_PROTOCOL *efi_get_gop(void);
+static UINTN efi_find_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
+                               UINTN cols, UINTN rows, UINTN depth);
+static void efi_tables(void);
+static void setup_efi_pci(void);
+static void efi_variables(void);
+static void efi_set_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINTN gop_mode);
+static void efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
+
 static const EFI_BOOT_SERVICES *__initdata efi_bs;
 static UINT32 __initdata efi_bs_revision;
 static EFI_HANDLE __initdata efi_ih;
@@ -97,6 +148,56 @@ static CHAR16 __initdata newline[] = L"\r\n";
 
 #define PrintStr(s) StdOut->OutputString(StdOut, s)
 #define PrintErr(s) StdErr->OutputString(StdErr, s)
+
+#ifdef CONFIG_ARM
+/*
+ * TODO: Enable EFI boot allocator on ARM.
+ * This code can be common for x86 and ARM.
+ * Things TODO on ARM before enabling ebmalloc:
+ *   - estimate required EBMALLOC_SIZE value,
+ *   - where (in which section) ebmalloc_mem[] should live; if in
+ *     .bss.page_aligned, as it is right now, then whole BSS zeroing
+ *     have to be disabled in xen/arch/arm/arm64/head.S; though BSS
+ *     should be initialized somehow before use of variables living there,
+ *   - use ebmalloc() in ARM/common EFI boot code,
+ *   - call free_ebmalloc_unused_mem() somewhere in init code.
+ */
+#define EBMALLOC_SIZE	MB(0)
+#else
+#define EBMALLOC_SIZE	MB(1)
+#endif
+
+static char __section(".bss.page_aligned") __aligned(PAGE_SIZE)
+    ebmalloc_mem[EBMALLOC_SIZE];
+static unsigned long __initdata ebmalloc_allocated;
+
+/* EFI boot allocator. */
+static void __init __maybe_unused *ebmalloc(size_t size)
+{
+    void *ptr = ebmalloc_mem + ebmalloc_allocated;
+
+    ebmalloc_allocated += (size + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+
+    if ( ebmalloc_allocated > sizeof(ebmalloc_mem) )
+        blexit(L"Out of static memory\r\n");
+
+    return ptr;
+}
+
+static void __init __maybe_unused free_ebmalloc_unused_mem(void)
+{
+#if 0 /* FIXME: Putting a hole in the BSS breaks the IOMMU mappings for dom0. */
+    unsigned long start, end;
+
+    start = (unsigned long)ebmalloc_mem + PAGE_ALIGN(ebmalloc_allocated);
+    end = (unsigned long)ebmalloc_mem + sizeof(ebmalloc_mem);
+
+    destroy_xen_mappings(start, end);
+    init_xenheap_pages(__pa(start), __pa(end));
+
+    printk(XENLOG_INFO "Freed %lukB unused BSS memory\n", (end - start) >> 10);
+#endif
+}
 
 /*
  * Include architecture specific implementation here, which references the
@@ -839,6 +940,46 @@ static void __init efi_variables(void)
     }
 }
 
+static void __init efi_get_apple_properties(void)
+{
+    static EFI_GUID __initdata props_guid = APPLE_PROPERTIES_PROTOCOL_GUID;
+    EFI_APPLE_PROPERTIES *props;
+    UINT32 size = 0;
+    VOID *data;
+    EFI_STATUS status;
+
+    if ( efi_bs->LocateProtocol(&props_guid, NULL,
+                                (void **)&props) != EFI_SUCCESS )
+        return;
+    if ( props->Version != 0x10000 )
+    {
+        PrintStr(L"Warning: Unsupported Apple device properties version: ");
+        DisplayUint(props->Version, 0);
+        PrintStr(newline);
+        return;
+    }
+
+    props->GetAll(props, NULL, &size);
+    if ( !size ||
+         efi_bs->AllocatePool(EfiRuntimeServicesData, size,
+                              &data) != EFI_SUCCESS )
+        return;
+
+    status = props->GetAll(props, data, &size);
+    if ( status == EFI_SUCCESS )
+    {
+        efi_apple_properties_addr = (UINTN)data;
+        efi_apple_properties_len = size;
+    }
+    else
+    {
+        efi_bs->FreePool(data);
+        PrintStr(L"Warning: Could not query Apple device properties: ");
+        DisplayUint(status, 0);
+        PrintStr(newline);
+    }
+}
+
 static void __init efi_set_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINTN gop_mode)
 {
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mode_info;
@@ -1147,6 +1288,9 @@ efi_start(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     /* Get snapshot of variable store parameters. */
     efi_variables();
 
+    /* Collect Apple device properties, if any. */
+    efi_get_apple_properties();
+
     efi_arch_memory_setup();
 
     if ( gop )
@@ -1250,6 +1394,11 @@ void __init efi_init_memory(void)
         unsigned int prot;
     } *extra, *extra_head = NULL;
 #endif
+
+    free_ebmalloc_unused_mem();
+
+    if ( !efi_enabled(EFI_BOOT) )
+        return;
 
     printk(XENLOG_INFO "EFI memory map:%s\n",
            map_bs ? " (mapping BootServices)" : "");

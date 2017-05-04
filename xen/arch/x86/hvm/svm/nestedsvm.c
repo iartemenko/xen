@@ -278,12 +278,16 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
     /* EFER */
     v->arch.hvm_vcpu.guest_efer = n1vmcb->_efer;
     rc = hvm_set_efer(n1vmcb->_efer);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_efer failed, rc: %u\n", rc);
 
     /* CR4 */
     v->arch.hvm_vcpu.guest_cr[4] = n1vmcb->_cr4;
     rc = hvm_set_cr4(n1vmcb->_cr4, 1);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr4 failed, rc: %u\n", rc);
 
@@ -293,6 +297,8 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
     v->arch.hvm_vcpu.guest_cr[0] = n1vmcb->_cr0 | X86_CR0_PE;
     n1vmcb->rflags &= ~X86_EFLAGS_VM;
     rc = hvm_set_cr0(n1vmcb->_cr0 | X86_CR0_PE, 1);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr0 failed, rc: %u\n", rc);
     svm->ns_cr0 = v->arch.hvm_vcpu.guest_cr[0];
@@ -319,6 +325,8 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
     }
     rc = hvm_set_cr3(n1vmcb->_cr3, 1);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
 
@@ -538,12 +546,16 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* EFER */
     v->arch.hvm_vcpu.guest_efer = ns_vmcb->_efer;
     rc = hvm_set_efer(ns_vmcb->_efer);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_efer failed, rc: %u\n", rc);
 
     /* CR4 */
     v->arch.hvm_vcpu.guest_cr[4] = ns_vmcb->_cr4;
     rc = hvm_set_cr4(ns_vmcb->_cr4, 1);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr4 failed, rc: %u\n", rc);
 
@@ -552,6 +564,8 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     cr0 = nestedsvm_fpu_vmentry(svm->ns_cr0, ns_vmcb, n1vmcb, n2vmcb);
     v->arch.hvm_vcpu.guest_cr[0] = ns_vmcb->_cr0;
     rc = hvm_set_cr0(cr0, 1);
+    if ( rc == X86EMUL_EXCEPTION )
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr0 failed, rc: %u\n", rc);
 
@@ -568,6 +582,8 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
 
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
         rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
+        if ( rc == X86EMUL_EXCEPTION )
+            hvm_inject_hw_exception(TRAP_gp_fault, 0);
         if (rc != X86EMUL_OKAY)
             gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
     } else if (paging_mode_hap(v->domain)) {
@@ -580,6 +596,8 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
          */
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
         rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
+        if ( rc == X86EMUL_EXCEPTION )
+            hvm_inject_hw_exception(TRAP_gp_fault, 0);
         if (rc != X86EMUL_OKAY)
             gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
     } else {
@@ -975,7 +993,7 @@ nsvm_vmcb_guest_intercepts_exitcode(struct vcpu *v,
             break;
         ns_vmcb = nv->nv_vvmcx;
         vmexits = nsvm_vmcb_guest_intercepts_msr(svm->ns_cached_msrpm,
-            regs->_ecx, ns_vmcb->exitinfo1 != 0);
+            regs->ecx, ns_vmcb->exitinfo1 != 0);
         if (vmexits == NESTEDHVM_VMEXIT_HOST)
             return 0;
         break;
@@ -1388,6 +1406,8 @@ nestedsvm_check_intercepts(struct vcpu *v, struct cpu_user_regs *regs,
         /* Always let the guest handle VMMCALL/VMCALL */
         return NESTEDHVM_VMEXIT_INJECT;
     default:
+        gprintk(XENLOG_ERR, "Unexpected nested vmexit: reason %#"PRIx64"\n",
+                exitcode);
         break;
     }
 

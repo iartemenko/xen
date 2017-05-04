@@ -17,7 +17,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/xmalloc.h>
@@ -84,6 +83,8 @@ static const unsigned int vlapic_lvt_mask[VLAPIC_LVT_NUM] =
     ((vlapic_get_reg(vlapic, APIC_LVTT) & APIC_TIMER_MODE_MASK) \
      == APIC_TIMER_MODE_TSC_DEADLINE)
 
+static void vlapic_do_init(struct vlapic *vlapic);
+
 static int vlapic_find_highest_vector(const void *bitmap)
 {
     const uint32_t *word = bitmap;
@@ -94,19 +95,6 @@ static int vlapic_find_highest_vector(const void *bitmap)
         continue;
 
     return (fls(word[word_offset*4]) - 1) + (word_offset * 32);
-}
-
-static int vlapic_find_lowest_vector(const void *bitmap)
-{
-    const uint32_t *word = bitmap;
-    unsigned int word_offset;
-
-    /* Work forwards through the bitmap (first 32-bit word in every four). */
-    for ( word_offset = 0; word_offset < NR_VECTORS / 32; word_offset++)
-        if ( word[word_offset * 4] )
-            return (ffs(word[word_offset * 4]) - 1) + (word_offset * 32);
-
-    return -1;
 }
 
 /*
@@ -295,7 +283,7 @@ static void vlapic_init_sipi_one(struct vcpu *target, uint32_t icr)
         rc = vcpu_reset(target);
         ASSERT(!rc);
         target->fpu_initialised = fpu_initialised;
-        vlapic_reset(vcpu_vlapic(target));
+        vlapic_do_init(vcpu_vlapic(target));
         domain_unlock(target->domain);
         break;
     }
@@ -387,7 +375,7 @@ struct vlapic *vlapic_lowest_prio(
     struct domain *d, const struct vlapic *source,
     int short_hand, uint32_t dest, bool_t dest_mode)
 {
-    int old = d->arch.hvm_domain.irq.round_robin_prev_vcpu;
+    int old = hvm_domain_irq(d)->round_robin_prev_vcpu;
     uint32_t ppr, target_ppr = UINT_MAX;
     struct vlapic *vlapic, *target = NULL;
     struct vcpu *v;
@@ -408,8 +396,8 @@ struct vlapic *vlapic_lowest_prio(
     } while ( v->vcpu_id != old );
 
     if ( target != NULL )
-        d->arch.hvm_domain.irq.round_robin_prev_vcpu =
-            vlapic_vcpu(target)->vcpu_id;
+        hvm_domain_irq(d)->round_robin_prev_vcpu =
+           vlapic_vcpu(target)->vcpu_id;
 
     return target;
 }
@@ -1121,7 +1109,7 @@ static int __vlapic_accept_pic_intr(struct vcpu *v)
     if ( !has_vioapic(d) )
         return 0;
 
-    redir0 = domain_vioapic(d)->redirtbl[0];
+    redir0 = domain_vioapic(d, 0)->redirtbl[0];
 
     /* We deliver 8259 interrupts to the appropriate CPU as follows. */
     return ((/* IOAPIC pin0 is unmasked and routing to this LAPIC? */
@@ -1202,19 +1190,17 @@ int vlapic_has_pending_irq(struct vcpu *v)
         vlapic_clear_vector(vector, &vlapic->regs->data[APIC_ISR]);
 
     isr = vlapic_find_highest_isr(vlapic);
-    isr = (isr != -1) ? isr : 0;
-    if ( (isr & 0xf0) >= (irr & 0xf0) )
-    {
-        /*
-         * There's already a higher priority vector pending so
-         * we need to abort any previous APIC assist to ensure there
-         * is an EOI.
-         */
-        viridian_abort_apic_assist(v);
-        return -1;
-    }
+    if ( isr == -1 )
+        return irr;
 
-    return irr;
+    /*
+     * A vector is pending in the ISR so, regardless of whether the new
+     * vector in the IRR is lower or higher in priority, any pending
+     * APIC assist must be aborted to ensure an EOI.
+     */
+    viridian_abort_apic_assist(v);
+
+    return ((isr & 0xf0) < (irr & 0xf0)) ? irr : -1;
 }
 
 int vlapic_ack_pending_irq(struct vcpu *v, int vector, bool_t force_ack)
@@ -1231,16 +1217,15 @@ int vlapic_ack_pending_irq(struct vcpu *v, int vector, bool_t force_ack)
          vlapic_test_vector(vector, &vlapic->regs->data[APIC_TMR]) )
         goto done;
 
-    isr = vlapic_find_lowest_vector(&vlapic->regs->data[APIC_ISR]);
-    if ( isr >= 0 && isr < vector )
-        goto done;
-
-    /*
-     * This vector is edge triggered and there are no lower priority
-     * vectors pending, so we can use APIC assist to avoid exiting
-     * for EOI.
-     */
-    viridian_start_apic_assist(v, vector);
+    isr = vlapic_find_highest_isr(vlapic);
+    if ( isr == -1 )
+    {
+        /*
+         * This vector is edge triggered and no other vectors are pending
+         * in the ISR so we can use APIC assist to avoid exiting for EOI.
+         */
+        viridian_start_apic_assist(v, vector);
+    }
 
  done:
     vlapic_set_vector(vector, &vlapic->regs->data[APIC_ISR]);
@@ -1254,16 +1239,14 @@ bool_t is_vlapic_lvtpc_enabled(struct vlapic *vlapic)
             !(vlapic_get_reg(vlapic, APIC_LVTPC) & APIC_LVT_MASKED));
 }
 
-/* Reset the VLPAIC back to its power-on/reset state. */
-void vlapic_reset(struct vlapic *vlapic)
+/* Reset the VLAPIC back to its init state. */
+static void vlapic_do_init(struct vlapic *vlapic)
 {
-    struct vcpu *v = vlapic_vcpu(vlapic);
     int i;
 
-    if ( !has_vlapic(v->domain) )
+    if ( !has_vlapic(vlapic_vcpu(vlapic)->domain) )
         return;
 
-    vlapic_set_reg(vlapic, APIC_ID,  (v->vcpu_id * 2) << 24);
     vlapic_set_reg(vlapic, APIC_LVR, VLAPIC_VERSION);
 
     for ( i = 0; i < 8; i++ )
@@ -1274,7 +1257,12 @@ void vlapic_reset(struct vlapic *vlapic)
     }
     vlapic_set_reg(vlapic, APIC_ICR,     0);
     vlapic_set_reg(vlapic, APIC_ICR2,    0);
-    vlapic_set_reg(vlapic, APIC_LDR,     0);
+    /*
+     * LDR is read-only in x2APIC mode. Preserve its value when handling
+     * INIT signal in x2APIC mode.
+     */
+    if ( !vlapic_x2apic_mode(vlapic) )
+        vlapic_set_reg(vlapic, APIC_LDR, 0);
     vlapic_set_reg(vlapic, APIC_TASKPRI, 0);
     vlapic_set_reg(vlapic, APIC_TMICT,   0);
     vlapic_set_reg(vlapic, APIC_TMCCT,   0);
@@ -1290,6 +1278,23 @@ void vlapic_reset(struct vlapic *vlapic)
 
     TRACE_0D(TRC_HVM_EMUL_LAPIC_STOP_TIMER);
     destroy_periodic_time(&vlapic->pt);
+}
+
+/* Reset the VLAPIC back to its power-on/reset state. */
+void vlapic_reset(struct vlapic *vlapic)
+{
+    const struct vcpu *v = vlapic_vcpu(vlapic);
+
+    if ( !has_vlapic(v->domain) )
+        return;
+
+    vlapic->hw.apic_base_msr = (MSR_IA32_APICBASE_ENABLE |
+                                APIC_DEFAULT_PHYS_BASE);
+    if ( v->vcpu_id == 0 )
+        vlapic->hw.apic_base_msr |= MSR_IA32_APICBASE_BSP;
+
+    vlapic_set_reg(vlapic, APIC_ID, (v->vcpu_id * 2) << 24);
+    vlapic_do_init(vlapic);
 }
 
 /* rearm the actimer if needed, after a HVM restore */
@@ -1505,11 +1510,6 @@ int vlapic_init(struct vcpu *v)
     clear_page(vlapic->regs);
 
     vlapic_reset(vlapic);
-
-    vlapic->hw.apic_base_msr = (MSR_IA32_APICBASE_ENABLE |
-                                APIC_DEFAULT_PHYS_BASE);
-    if ( v->vcpu_id == 0 )
-        vlapic->hw.apic_base_msr |= MSR_IA32_APICBASE_BSP;
 
     spin_lock_init(&vlapic->esr_lock);
 

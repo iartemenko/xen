@@ -6,6 +6,10 @@
 #include <string.h>
 #include <xen/xen.h>
 
+#include <asm/msr-index.h>
+#include <asm/x86-defns.h>
+#include <asm/x86-vendors.h>
+
 #define BUG() abort()
 #define ASSERT assert
 #define ASSERT_UNREACHABLE() assert(!__LINE__)
@@ -38,13 +42,10 @@
 
 #define is_canonical_address(x) (((int64_t)(x) >> 47) == ((int64_t)(x) >> 63))
 
-/* There's no strict need for these to be in sync with processor.h. */
-#define X86_VENDOR_INTEL   0
-#define X86_VENDOR_AMD     2
-#define X86_VENDOR_UNKNOWN 0xff
+extern uint32_t mxcsr_mask;
 
 #define MMAP_SZ 16384
-bool emul_test_make_stack_executable(void);
+bool emul_test_init(void);
 
 #include "x86_emulate/x86_emulate.h"
 
@@ -69,6 +70,12 @@ static inline uint64_t xgetbv(uint32_t xcr)
     (res.d & (1U << 23)) != 0; \
 })
 
+#define cpu_has_fxsr ({ \
+    struct cpuid_leaf res; \
+    emul_test_cpuid(1, 0, &res, NULL); \
+    (res.d & (1U << 24)) != 0; \
+})
+
 #define cpu_has_sse ({ \
     struct cpuid_leaf res; \
     emul_test_cpuid(1, 0, &res, NULL); \
@@ -79,6 +86,24 @@ static inline uint64_t xgetbv(uint32_t xcr)
     struct cpuid_leaf res; \
     emul_test_cpuid(1, 0, &res, NULL); \
     (res.d & (1U << 26)) != 0; \
+})
+
+#define cpu_has_sse3 ({ \
+    struct cpuid_leaf res; \
+    emul_test_cpuid(1, 0, &res, NULL); \
+    (res.c & (1U << 0)) != 0; \
+})
+
+#define cpu_has_sse4_1 ({ \
+    struct cpuid_leaf res; \
+    emul_test_cpuid(1, 0, &res, NULL); \
+    (res.c & (1U << 19)) != 0; \
+})
+
+#define cpu_has_sse4_2 ({ \
+    struct cpuid_leaf res; \
+    emul_test_cpuid(1, 0, &res, NULL); \
+    (res.c & (1U << 20)) != 0; \
 })
 
 #define cpu_has_popcnt ({ \
@@ -125,6 +150,12 @@ static inline uint64_t xgetbv(uint32_t xcr)
     (res.b & (1U << 8)) != 0; \
 })
 
+#define cpu_has_sse4a ({ \
+    struct cpuid_leaf res; \
+    emul_test_cpuid(0x80000001, 0, &res, NULL); \
+    (res.c & (1U << 6)) != 0; \
+})
+
 #define cpu_has_tbm ({ \
     struct cpuid_leaf res; \
     emul_test_cpuid(0x80000001, 0, &res, NULL); \
@@ -147,3 +178,8 @@ int emul_test_get_fpu(
     void *exception_callback_arg,
     enum x86_emulate_fpu_type type,
     struct x86_emulate_ctxt *ctxt);
+
+void emul_test_put_fpu(
+    struct x86_emulate_ctxt *ctxt,
+    enum x86_emulate_fpu_type backout,
+    const struct x86_emul_fpu_aux *aux);

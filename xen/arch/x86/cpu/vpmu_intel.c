@@ -18,7 +18,6 @@
  * Author: Haitao Shan <haitao.shan@intel.com>
  */
 
-#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/xenoprof.h>
 #include <xen/irq.h>
@@ -74,6 +73,7 @@ static bool_t __read_mostly full_width_write;
  */
 #define FIXED_CTR_CTRL_BITS 4
 #define FIXED_CTR_CTRL_MASK ((1 << FIXED_CTR_CTRL_BITS) - 1)
+#define FIXED_CTR_CTRL_ANYTHREAD_MASK 0x4
 
 #define ARCH_CNTR_ENABLED   (1ULL << 22)
 
@@ -307,7 +307,7 @@ static inline void __core2_vpmu_save(struct vcpu *v)
     for ( i = 0; i < arch_pmc_cnt; i++ )
         rdmsrl(MSR_IA32_PERFCTR0 + i, xen_pmu_cntr_pair[i].counter);
 
-    if ( !has_hvm_container_vcpu(v) )
+    if ( !is_hvm_vcpu(v) )
         rdmsrl(MSR_CORE_PERF_GLOBAL_STATUS, core2_vpmu_cxt->global_status);
 }
 
@@ -315,7 +315,7 @@ static int core2_vpmu_save(struct vcpu *v, bool_t to_guest)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
 
-    if ( !has_hvm_container_vcpu(v) )
+    if ( !is_hvm_vcpu(v) )
         wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
 
     if ( !vpmu_are_all_set(vpmu, VPMU_CONTEXT_SAVE | VPMU_CONTEXT_LOADED) )
@@ -324,8 +324,8 @@ static int core2_vpmu_save(struct vcpu *v, bool_t to_guest)
     __core2_vpmu_save(v);
 
     /* Unset PMU MSR bitmap to trap lazy load. */
-    if ( !vpmu_is_set(vpmu, VPMU_RUNNING) &&
-         has_hvm_container_vcpu(v) && cpu_has_vmx_msr_bitmap )
+    if ( !vpmu_is_set(vpmu, VPMU_RUNNING) && is_hvm_vcpu(v) &&
+         cpu_has_vmx_msr_bitmap )
         core2_vpmu_unset_msr_bitmap(v->arch.hvm_vmx.msr_bitmap);
 
     if ( to_guest )
@@ -363,7 +363,7 @@ static inline void __core2_vpmu_load(struct vcpu *v)
     if ( vpmu_is_set(vcpu_vpmu(v), VPMU_CPU_HAS_DS) )
         wrmsrl(MSR_IA32_DS_AREA, core2_vpmu_cxt->ds_area);
 
-    if ( !has_hvm_container_vcpu(v) )
+    if ( !is_hvm_vcpu(v) )
     {
         wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL, core2_vpmu_cxt->global_ovf_ctrl);
         core2_vpmu_cxt->global_ovf_ctrl = 0;
@@ -414,7 +414,7 @@ static int core2_vpmu_verify(struct vcpu *v)
     }
 
     if ( vpmu_is_set(vpmu, VPMU_CPU_HAS_DS) &&
-         !(has_hvm_container_vcpu(v)
+         !(is_hvm_vcpu(v)
            ? is_canonical_address(core2_vpmu_cxt->ds_area)
            : __addr_ok(core2_vpmu_cxt->ds_area)) )
         return -EINVAL;
@@ -475,7 +475,7 @@ static int core2_vpmu_alloc_resource(struct vcpu *v)
     if ( !acquire_pmu_ownership(PMU_OWNER_HVM) )
         return 0;
 
-    if ( has_hvm_container_vcpu(v) )
+    if ( is_hvm_vcpu(v) )
     {
         wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
         if ( vmx_add_host_load_msr(MSR_CORE_PERF_GLOBAL_CTRL) )
@@ -540,7 +540,7 @@ static int core2_vpmu_msr_common_check(u32 msr_index, int *type, int *index)
     {
         __core2_vpmu_load(current);
         vpmu_set(vpmu, VPMU_CONTEXT_LOADED);
-        if ( has_hvm_container_vcpu(current) &&
+        if ( is_hvm_vcpu(current) &&
              cpu_has_vmx_msr_bitmap )
             core2_vpmu_set_msr_bitmap(current->arch.hvm_vmx.msr_bitmap);
     }
@@ -613,9 +613,8 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
             return -EINVAL;
         if ( vpmu_is_set(vpmu, VPMU_CPU_HAS_DS) )
         {
-            if ( !(has_hvm_container_vcpu(v)
-                   ? is_canonical_address(msr_content)
-                   : __addr_ok(msr_content)) )
+            if ( !(is_hvm_vcpu(v) ? is_canonical_address(msr_content)
+                                  : __addr_ok(msr_content)) )
             {
                 gdprintk(XENLOG_WARNING,
                          "Illegal address for IA32_DS_AREA: %#" PRIx64 "x\n",
@@ -636,7 +635,7 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         if ( msr_content & fixed_ctrl_mask )
             return -EINVAL;
 
-        if ( has_hvm_container_vcpu(v) )
+        if ( is_hvm_vcpu(v) )
             vmx_read_guest_msr(MSR_CORE_PERF_GLOBAL_CTRL,
                                &core2_vpmu_cxt->global_ctrl);
         else
@@ -705,7 +704,7 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
             if ( blocked )
                 return -EINVAL;
 
-            if ( has_hvm_container_vcpu(v) )
+            if ( is_hvm_vcpu(v) )
                 vmx_read_guest_msr(MSR_CORE_PERF_GLOBAL_CTRL,
                                    &core2_vpmu_cxt->global_ctrl);
             else
@@ -724,7 +723,7 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         wrmsrl(msr, msr_content);
     else
     {
-        if ( has_hvm_container_vcpu(v) )
+        if ( is_hvm_vcpu(v) )
             vmx_write_guest_msr(MSR_CORE_PERF_GLOBAL_CTRL, msr_content);
         else
             wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, msr_content);
@@ -758,7 +757,7 @@ static int core2_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
             *msr_content = core2_vpmu_cxt->global_status;
             break;
         case MSR_CORE_PERF_GLOBAL_CTRL:
-            if ( has_hvm_container_vcpu(v) )
+            if ( is_hvm_vcpu(v) )
                 vmx_read_guest_msr(MSR_CORE_PERF_GLOBAL_CTRL, msr_content);
             else
                 rdmsrl(MSR_CORE_PERF_GLOBAL_CTRL, *msr_content);
@@ -859,7 +858,7 @@ static void core2_vpmu_destroy(struct vcpu *v)
     vpmu->context = NULL;
     xfree(vpmu->priv_context);
     vpmu->priv_context = NULL;
-    if ( has_hvm_container_vcpu(v) && cpu_has_vmx_msr_bitmap )
+    if ( is_hvm_vcpu(v) && cpu_has_vmx_msr_bitmap )
         core2_vpmu_unset_msr_bitmap(v->arch.hvm_vmx.msr_bitmap);
     release_pmu_ownership(PMU_OWNER_HVM);
     vpmu_clear(vpmu);
@@ -883,6 +882,10 @@ int vmx_vpmu_initialise(struct vcpu *v)
 
     if ( vpmu_mode == XENPMU_MODE_OFF )
         return 0;
+
+    if ( v->domain->arch.cpuid->basic.pmu_version <= 1 ||
+         v->domain->arch.cpuid->basic.pmu_version >= 5 )
+        return -EINVAL;
 
     if ( (arch_pmc_cnt + fixed_pmc_cnt) == 0 )
         return -EINVAL;
@@ -944,6 +947,7 @@ int __init core2_vpmu_init(void)
 {
     u64 caps;
     unsigned int version = 0;
+    unsigned int i;
 
     if ( current_cpu_data.cpuid_level >= 0xa )
         version = MASK_EXTR(cpuid_eax(0xa), PMU_VERSION_MASK);
@@ -977,8 +981,11 @@ int __init core2_vpmu_init(void)
     full_width_write = (caps >> 13) & 1;
 
     fixed_ctrl_mask = ~((1ull << (fixed_pmc_cnt * FIXED_CTR_CTRL_BITS)) - 1);
-    if ( version == 2 )
-        fixed_ctrl_mask |= 0x444;
+    /* mask .AnyThread bits for all fixed counters */
+    for( i = 0; i < fixed_pmc_cnt; i++ )
+       fixed_ctrl_mask |=
+           (FIXED_CTR_CTRL_ANYTHREAD_MASK << (FIXED_CTR_CTRL_BITS * i));
+
     fixed_counters_mask = ~((1ull << core2_get_bitwidth_fix_count()) - 1);
     global_ctrl_mask = ~((((1ULL << fixed_pmc_cnt) - 1) << 32) |
                          ((1ULL << arch_pmc_cnt) - 1));

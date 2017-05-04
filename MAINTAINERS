@@ -215,7 +215,6 @@ F:	xen/include/asm-x86/tboot.h
 
 INTEL(R) VT FOR DIRECTED I/O (VT-D)
 M:	Kevin Tian <kevin.tian@intel.com>
-M:	Feng Wu <feng.wu@intel.com>
 S:	Supported
 F:	xen/drivers/passthrough/vtd/
 
@@ -270,12 +269,6 @@ F:  xen/include/asm-*/livepatch.h
 F:  xen/include/xen/livepatch*
 F:  xen/test/livepatch/*
 
-MACHINE CHECK (MCA) & RAS
-M:	Christoph Egger <chegger@amazon.de>
-M:	Liu Jinsong <jinsong.liu@alibaba-inc.com>
-S:	Supported
-F:	xen/arch/x86/cpu/mcheck/
-
 MINI-OS
 M:	Samuel Thibault <samuel.thibault@ens-lyon.org>
 S:	Supported
@@ -296,13 +289,22 @@ T:	git git://xenbits.xen.org/ovmf.git
 
 POWER MANAGEMENT
 M:	Jan Beulich <jbeulich@suse.com>
-M:	Liu Jinsong <jinsong.liu@alibaba-inc.com>
 S:	Supported
 F:	xen/arch/x86/acpi/
 X:	xen/arch/x86/acpi/boot.c
 X:	xen/arch/x86/acpi/lib.c
 F:	xen/drivers/cpufreq/
 F:	xen/include/acpi/cpufreq/
+
+PUBLIC I/O INTERFACES AND PV DRIVERS DESIGNS
+M:  Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+S:  Supported
+F:  xen/include/public/io/
+
+PYTHON BINDINGS
+M:	Marek Marczykowski-Górecki <marmarek@invisiblethingslab.com>
+S:	Supported
+F:	tools/python
 
 QEMU-DM
 M:	Ian Jackson <ian.jackson@eu.citrix.com>
@@ -432,6 +434,7 @@ F:	xen/arch/x86/
 F:	xen/include/asm-x86/
 F:	tools/firmware/hvmloader/
 F:	tools/tests/x86_emulator/
+F:	tools/fuzz/x86_instruction_emulator/
 
 X86 I/O EMULATION
 M:	Paul Durrant <paul.durrant@citrix.com>

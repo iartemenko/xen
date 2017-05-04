@@ -24,7 +24,6 @@
  *
  */
 #include <asm/io.h>
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/pfn.h>
 #include <xen/types.h>
@@ -38,7 +37,6 @@
 #include <xen/domain_page.h>
 #include <xen/efi.h>
 #include <xen/vmap.h>
-#include <xen/kconfig.h>
 
 #define _COMPONENT		ACPI_OS_SERVICES
 ACPI_MODULE_NAME("osl")
@@ -89,7 +87,7 @@ acpi_physical_address __init acpi_os_get_root_pointer(void)
 void __iomem *
 acpi_os_map_memory(acpi_physical_address phys, acpi_size size)
 {
-	if (system_state >= SYS_STATE_active) {
+	if (system_state >= SYS_STATE_boot) {
 		mfn_t mfn = _mfn(PFN_DOWN(phys));
 		unsigned int offs = phys & (PAGE_SIZE - 1);
 
@@ -104,7 +102,14 @@ acpi_os_map_memory(acpi_physical_address phys, acpi_size size)
 
 void acpi_os_unmap_memory(void __iomem * virt, acpi_size size)
 {
-	if (system_state >= SYS_STATE_active)
+	if (IS_ENABLED(CONFIG_X86) &&
+	    (unsigned long)virt >= DIRECTMAP_VIRT_START &&
+	    (unsigned long)virt < DIRECTMAP_VIRT_END) {
+		ASSERT(!((__pa(virt) + size - 1) >> 20));
+		return;
+	}
+
+	if (system_state >= SYS_STATE_boot)
 		vunmap((void *)((unsigned long)virt & PAGE_MASK));
 }
 
@@ -150,6 +155,9 @@ acpi_os_read_memory(acpi_physical_address phys_addr, u32 * value, u32 width)
 	u32 dummy;
 	void __iomem *virt_addr = acpi_os_map_memory(phys_addr, width >> 3);
 
+	if (!virt_addr)
+		return AE_ERROR;
+
 	if (!value)
 		value = &dummy;
 
@@ -176,6 +184,9 @@ acpi_status
 acpi_os_write_memory(acpi_physical_address phys_addr, u32 value, u32 width)
 {
 	void __iomem *virt_addr = acpi_os_map_memory(phys_addr, width >> 3);
+
+	if (!virt_addr)
+		return AE_ERROR;
 
 	switch (width) {
 	case 8:

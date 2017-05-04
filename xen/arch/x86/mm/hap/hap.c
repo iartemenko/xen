@@ -19,7 +19,6 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/trace.h>
@@ -46,8 +45,6 @@
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef mfn_to_page
 #define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
-#undef mfn_valid
-#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
 #undef page_to_mfn
 #define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
 
@@ -190,6 +187,15 @@ out:
  */
 static int hap_enable_log_dirty(struct domain *d, bool_t log_global)
 {
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+    /*
+     * Refuse to turn on global log-dirty mode if
+     * there are outstanding p2m_ioreq_server pages.
+     */
+    if ( log_global && read_atomic(&p2m->ioreq.entry_count) )
+        return -EBUSY;
+
     /* turn on PG_log_dirty bit in paging mode */
     paging_lock(d);
     d->arch.paging.mode |= PG_log_dirty;
@@ -445,14 +451,16 @@ static void hap_destroy_monitor_table(struct vcpu* v, mfn_t mmfn)
 /************************************************/
 void hap_domain_init(struct domain *d)
 {
+    static const struct log_dirty_ops hap_ops = {
+        .enable  = hap_enable_log_dirty,
+        .disable = hap_disable_log_dirty,
+        .clean   = hap_clean_dirty_bitmap,
+    };
+
     INIT_PAGE_LIST_HEAD(&d->arch.paging.hap.freelist);
 
-    d->arch.paging.gfn_bits = hap_paddr_bits - PAGE_SHIFT;
-
     /* Use HAP logdirty mechanism. */
-    paging_log_dirty_init(d, hap_enable_log_dirty,
-                          hap_disable_log_dirty,
-                          hap_clean_dirty_bitmap);
+    paging_log_dirty_init(d, &hap_ops);
 }
 
 /* return 0 for success, -errno for failure */
@@ -691,10 +699,10 @@ static void hap_update_cr3(struct vcpu *v, int do_locking)
 const struct paging_mode *
 hap_paging_get_mode(struct vcpu *v)
 {
-    return !hvm_paging_enabled(v)   ? &hap_paging_real_mode :
-        hvm_long_mode_enabled(v) ? &hap_paging_long_mode :
-        hvm_pae_enabled(v)       ? &hap_paging_pae_mode  :
-                                   &hap_paging_protected_mode;
+    return (!hvm_paging_enabled(v)  ? &hap_paging_real_mode :
+            hvm_long_mode_active(v) ? &hap_paging_long_mode :
+            hvm_pae_enabled(v)      ? &hap_paging_pae_mode  :
+                                      &hap_paging_protected_mode);
 }
 
 static void hap_update_paging_modes(struct vcpu *v)

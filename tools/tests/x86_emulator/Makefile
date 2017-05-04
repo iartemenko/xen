@@ -11,28 +11,76 @@ all: $(TARGET)
 run: $(TARGET)
 	./$(TARGET)
 
-cflags-x86_32 := "-mno-accumulate-outgoing-args -Dstatic="
+SIMD := sse sse2 sse4
+TESTCASES := blowfish $(SIMD) $(addsuffix -avx,$(filter sse%,$(SIMD)))
 
-blowfish.h: blowfish.c blowfish.mk Makefile
-	rm -f $@.new blowfish.bin
+blowfish-cflags := ""
+blowfish-cflags-x86_32 := "-mno-accumulate-outgoing-args -Dstatic="
+
+sse-vecs := 16
+sse-ints :=
+sse-flts := 4
+sse2-vecs := $(sse-vecs)
+sse2-ints := 1 2 4 8
+sse2-flts := 4 8
+sse4-vecs := $(sse2-vecs)
+sse4-ints := $(sse2-ints)
+sse4-flts := $(sse2-flts)
+
+# When converting SSE to AVX, have the compiler avoid XMM0 to widen
+# coverage of the VEX.vvvv checks in the emulator. We must not do this,
+# however, for SSE4.1 and later, as there are instructions with XMM0 as
+# an implicit operand.
+sse2avx-sse  := -ffixed-xmm0 -Wa,-msse2avx
+sse2avx-sse2 := $(sse2avx-sse)
+sse2avx-sse4 := -Wa,-msse2avx
+
+define simd-defs
+$(1)-cflags := \
+	$(foreach vec,$($(1)-vecs), \
+	  $(foreach int,$($(1)-ints), \
+	    "-D_$(vec)i$(int) -m$(1) -O2 -DVEC_SIZE=$(vec) -DINT_SIZE=$(int)" \
+	    "-D_$(vec)u$(int) -m$(1) -O2 -DVEC_SIZE=$(vec) -DUINT_SIZE=$(int)") \
+	  $(foreach flt,$($(1)-flts), \
+	    "-D_$(vec)f$(flt) -m$(1) -O2 -DVEC_SIZE=$(vec) -DFLOAT_SIZE=$(flt)")) \
+	$(foreach flt,$($(1)-flts), \
+	  "-D_f$(flt) -m$(1) -mfpmath=sse -O2 -DFLOAT_SIZE=$(flt)")
+$(1)-avx-cflags := \
+	$(foreach vec,$($(1)-vecs), \
+	  $(foreach int,$($(1)-ints), \
+	    "-D_$(vec)i$(int) -m$(1) $(sse2avx-$(1)) -O2 -DVEC_SIZE=$(vec) -DINT_SIZE=$(int)" \
+	    "-D_$(vec)u$(int) -m$(1) $(sse2avx-$(1)) -O2 -DVEC_SIZE=$(vec) -DUINT_SIZE=$(int)") \
+	  $(foreach flt,$($(1)-flts), \
+	    "-D_$(vec)f$(flt) -m$(1) $(sse2avx-$(1)) -O2 -DVEC_SIZE=$(vec) -DFLOAT_SIZE=$(flt)")) \
+	$(foreach flt,$($(1)-flts), \
+	  "-D_f$(flt) -m$(1) -mfpmath=sse $(sse2avx-$(1)) -O2 -DFLOAT_SIZE=$(flt)")
+endef
+
+$(foreach flavor,$(SIMD),$(eval $(call simd-defs,$(flavor))))
+
+$(addsuffix .h,$(TESTCASES)): %.h: %.c testcase.mk Makefile
+	rm -f $@.new $*.bin
 	$(foreach arch,$(filter-out $(XEN_COMPILE_ARCH),x86_32) $(XEN_COMPILE_ARCH), \
-	    for cflags in "" $(cflags-$(arch)); do \
-		$(MAKE) -f blowfish.mk XEN_TARGET_ARCH=$(arch) BLOWFISH_CFLAGS="$$cflags" all; \
+	    for cflags in $($*-cflags) $($*-cflags-$(arch)); do \
+		$(MAKE) -f testcase.mk TESTCASE=$* XEN_TARGET_ARCH=$(arch) $*-cflags="$$cflags" all; \
 		flavor=$$(echo $${cflags} | sed -e 's, .*,,' -e 'y,-=,__,') ; \
-		(echo "static unsigned int blowfish_$(arch)$${flavor}[] = {"; \
-		 od -v -t x blowfish.bin | sed -e 's/^[0-9]* /0x/' -e 's/ /, 0x/g' -e 's/$$/,/'; \
+		(echo "static const unsigned int $(subst -,_,$*)_$(arch)$${flavor}[] = {"; \
+		 od -v -t x $*.bin | sed -e 's/^[0-9]* /0x/' -e 's/ /, 0x/g' -e 's/$$/,/'; \
 		 echo "};") >>$@.new; \
-		rm -f blowfish.bin; \
+		rm -f $*.bin; \
 	    done; \
 	)
 	mv $@.new $@
+
+$(addsuffix .c,$(SIMD)) $(addsuffix -avx.c,$(filter sse%,$(SIMD))):
+	ln -sf simd.c $@
 
 $(TARGET): x86_emulate.o test_x86_emulator.o
 	$(HOSTCC) -o $@ $^
 
 .PHONY: clean
 clean:
-	rm -rf $(TARGET) *.o *~ core blowfish.h blowfish.bin x86_emulate
+	rm -rf $(TARGET) *.o *~ core $(addsuffix .h,$(TESTCASES)) *.bin x86_emulate asm
 
 .PHONY: distclean
 distclean: clean
@@ -40,13 +88,23 @@ distclean: clean
 .PHONY: install
 install:
 
-x86_emulate/x86_emulate.c x86_emulate/x86_emulate.h:
-	[ -L x86_emulate ] || ln -sf $(XEN_ROOT)/xen/arch/x86/x86_emulate .
+x86_emulate:
+	[ -L $@ ] || ln -sf $(XEN_ROOT)/xen/arch/x86/$@
 
-HOSTCFLAGS += $(CFLAGS_xeninclude)
+x86_emulate/%: x86_emulate ;
 
-x86_emulate.o: x86_emulate.c x86_emulate/x86_emulate.c x86_emulate/x86_emulate.h
+asm:
+	[ -L $@ ] || ln -sf $(XEN_ROOT)/xen/include/asm-x86 $@
+
+asm/%: asm ;
+
+HOSTCFLAGS += $(CFLAGS_xeninclude) -I.
+
+x86.h := asm/x86-vendors.h asm/x86-defns.h asm/msr-index.h
+x86_emulate.h := x86_emulate.h x86_emulate/x86_emulate.h $(x86.h)
+
+x86_emulate.o: x86_emulate.c x86_emulate/x86_emulate.c $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -D__XEN_TOOLS__ -c -g -o $@ $<
 
-test_x86_emulator.o: test_x86_emulator.c blowfish.h x86_emulate/x86_emulate.h
+test_x86_emulator.o: test_x86_emulator.c $(addsuffix .h,$(TESTCASES)) $(x86_emulate.h)
 	$(HOSTCC) $(HOSTCFLAGS) -c -g -o $@ $<

@@ -1,5 +1,4 @@
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/types.h>
@@ -33,6 +32,8 @@ static int physdev_hvm_map_pirq(
 {
     int ret = 0;
 
+    ASSERT(!is_hardware_domain(d));
+
     spin_lock(&d->event_lock);
     switch ( type )
     {
@@ -40,7 +41,7 @@ static int physdev_hvm_map_pirq(
         const struct hvm_irq_dpci *hvm_irq_dpci;
         unsigned int machine_gsi = 0;
 
-        if ( *index < 0 || *index >= NR_HVM_IRQS )
+        if ( *index < 0 || *index >= NR_HVM_DOMU_IRQS )
         {
             ret = -EINVAL;
             break;
@@ -53,7 +54,7 @@ static int physdev_hvm_map_pirq(
         {
             const struct hvm_girq_dpci_mapping *girq;
 
-            BUILD_BUG_ON(ARRAY_SIZE(hvm_irq_dpci->girq) < NR_HVM_IRQS);
+            BUILD_BUG_ON(ARRAY_SIZE(hvm_irq_dpci->girq) < NR_HVM_DOMU_IRQS);
             list_for_each_entry ( girq,
                                   &hvm_irq_dpci->girq[*index],
                                   list )
@@ -94,7 +95,7 @@ int physdev_map_pirq(domid_t domid, int type, int *index, int *pirq_p,
     int pirq, irq, ret = 0;
     void *map_data = NULL;
 
-    if ( domid == DOMID_SELF && is_hvm_domain(d) )
+    if ( domid == DOMID_SELF && is_hvm_domain(d) && has_pirq(d) )
     {
         /*
          * Only makes sense for vector-based callback, else HVM-IRQ logic
@@ -265,7 +266,7 @@ int physdev_unmap_pirq(domid_t domid, int pirq)
     if ( ret )
         goto free_domain;
 
-    if ( is_hvm_domain(d) )
+    if ( is_hvm_domain(d) && has_pirq(d) )
     {
         spin_lock(&d->event_lock);
         if ( domain_pirq_to_emuirq(d, pirq) != IRQ_UNBOUND )
@@ -318,7 +319,7 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( is_hvm_domain(currd) &&
              domain_pirq_to_emuirq(currd, eoi.irq) > 0 )
         {
-            struct hvm_irq *hvm_irq = &currd->arch.hvm_domain.irq;
+            struct hvm_irq *hvm_irq = hvm_domain_irq(currd);
             int gsi = domain_pirq_to_emuirq(currd, eoi.irq);
 
             /* if this is a level irq and count > 0, send another
@@ -518,10 +519,6 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         struct vcpu *curr = current;
         struct physdev_set_iopl set_iopl;
 
-        ret = -ENOSYS;
-        if ( is_pvh_vcpu(curr) )
-            break;
-
         ret = -EFAULT;
         if ( copy_from_guest(&set_iopl, arg, 1) != 0 )
             break;
@@ -536,10 +533,6 @@ ret_t do_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     case PHYSDEVOP_set_iobitmap: {
         struct vcpu *curr = current;
         struct physdev_set_iobitmap set_iobitmap;
-
-        ret = -ENOSYS;
-        if ( is_pvh_vcpu(curr) )
-            break;
 
         ret = -EFAULT;
         if ( copy_from_guest(&set_iobitmap, arg, 1) != 0 )

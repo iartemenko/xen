@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/delay.h>
@@ -253,6 +252,8 @@ static void __init early_cpu_detect(void)
 		if (hap_paddr_bits > PADDR_BITS)
 			hap_paddr_bits = PADDR_BITS;
 	}
+
+	initialize_cpu_data(0);
 }
 
 static void generic_identify(struct cpuinfo_x86 *c)
@@ -407,9 +408,9 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		for ( i = 0 ; i < NCAPINTS ; i++ )
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
 
-		mcheck_init(c, 0);
+		mcheck_init(c, false);
 	} else {
-		mcheck_init(c, 1);
+		mcheck_init(c, true);
 
 		mtrr_bp_init();
 	}

@@ -619,6 +619,7 @@ static int register_one_rmrr(struct acpi_rmrr_unit *rmrru)
                 rmrru->base_address, rmrru->end_address);
         scope_devices_free(&rmrru->scope);
         xfree(rmrru);
+        return 1;
     }
     else if ( rmrru->base_address > rmrru->end_address )
     {
@@ -691,7 +692,17 @@ acpi_parse_one_rmrr(struct acpi_dmar_header *header)
                                &rmrru->scope, RMRR_TYPE, rmrr->segment);
 
     if ( !ret && (rmrru->scope.devices_cnt != 0) )
+    {
         ret = register_one_rmrr(rmrru);
+        /*
+         * register_one_rmrr() returns greater than 0 when a specified
+         * PCIe device cannot be detected. To prevent VT-d from being
+         * disabled in such cases, reset the return value to 0 here.
+         */
+        if ( ret > 0 )
+            ret = 0;
+
+    }
     else
         xfree(rmrru);
 
@@ -928,7 +939,7 @@ static int __init add_user_rmrr(void)
 
         do
         {
-            if ( !mfn_valid(base) )
+            if ( !mfn_valid(_mfn(base)) )
             {
                 printk(XENLOG_ERR VTDPREFIX
                        "Invalid pfn in RMRR range "ERMRRU_FMT"\n",
@@ -1086,13 +1097,13 @@ static void __init parse_rmrr_param(const char *str)
     unsigned long start, end;
 
     do {
-        start = simple_strtoul(cur = s, &s, 0);
+        start = simple_strtoul(cur = s, &s, 16);
         if ( cur == s )
             break;
 
         if ( *s == '-' )
         {
-            end = simple_strtoul(cur = s + 1, &s, 0);
+            end = simple_strtoul(cur = s + 1, &s, 16);
             if ( cur == s )
                 break;
         }

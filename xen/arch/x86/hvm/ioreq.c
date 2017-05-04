@@ -16,7 +16,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/ctype.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -754,6 +753,8 @@ int hvm_destroy_ioreq_server(struct domain *d, ioservid_t id)
 
         domain_pause(d);
 
+        p2m_set_ioreq_server(d, 0, s);
+
         hvm_ioreq_server_disable(s, 0);
 
         list_del(&s->list_entry);
@@ -911,6 +912,56 @@ int hvm_unmap_io_range_from_ioreq_server(struct domain *d, ioservid_t id,
     }
 
     spin_unlock_recursive(&d->arch.hvm_domain.ioreq_server.lock);
+
+    return rc;
+}
+
+/*
+ * Map or unmap an ioreq server to specific memory type. For now, only
+ * HVMMEM_ioreq_server is supported, and in the future new types can be
+ * introduced, e.g. HVMMEM_ioreq_serverX mapped to ioreq server X. And
+ * currently, only write operations are to be forwarded to an ioreq server.
+ * Support for the emulation of read operations can be added when an ioreq
+ * server has such requirement in the future.
+ */
+int hvm_map_mem_type_to_ioreq_server(struct domain *d, ioservid_t id,
+                                     uint32_t type, uint32_t flags)
+{
+    struct hvm_ioreq_server *s;
+    int rc;
+
+    if ( type != HVMMEM_ioreq_server )
+        return -EINVAL;
+
+    if ( flags & ~XEN_DMOP_IOREQ_MEM_ACCESS_WRITE )
+        return -EINVAL;
+
+    spin_lock_recursive(&d->arch.hvm_domain.ioreq_server.lock);
+
+    rc = -ENOENT;
+    list_for_each_entry ( s,
+                          &d->arch.hvm_domain.ioreq_server.list,
+                          list_entry )
+    {
+        if ( s == d->arch.hvm_domain.default_ioreq_server )
+            continue;
+
+        if ( s->id == id )
+        {
+            rc = p2m_set_ioreq_server(d, flags, s);
+            break;
+        }
+    }
+
+    spin_unlock_recursive(&d->arch.hvm_domain.ioreq_server.lock);
+
+    if ( rc == 0 && flags == 0 )
+    {
+        struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+        if ( read_atomic(&p2m->ioreq.entry_count) )
+            p2m_change_entry_type_global(d, p2m_ioreq_server, p2m_ram_rw);
+    }
 
     return rc;
 }
@@ -1388,8 +1439,7 @@ void hvm_ioreq_init(struct domain *d)
     spin_lock_init(&d->arch.hvm_domain.ioreq_server.lock);
     INIT_LIST_HEAD(&d->arch.hvm_domain.ioreq_server.list);
 
-    if ( !is_pvh_domain(d) )
-        register_portio_handler(d, 0xcf8, 4, hvm_access_cf8);
+    register_portio_handler(d, 0xcf8, 4, hvm_access_cf8);
 }
 
 /*

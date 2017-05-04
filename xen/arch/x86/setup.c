@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/err.h>
@@ -62,10 +61,6 @@ static unsigned int __initdata max_cpus;
 integer_param("maxcpus", max_cpus);
 
 unsigned long __read_mostly cr4_pv32_mask;
-
-/* Boot dom0 in pvh mode */
-static bool_t __initdata opt_dom0pvh;
-boolean_param("dom0pvh", opt_dom0pvh);
 
 /* **** Linux config option: propagated to domain0. */
 /* "acpi=off":    Sisables both ACPI table parsing and interpreter. */
@@ -329,9 +324,6 @@ static void *__init bootstrap_map(const module_t *mod)
     end = start + mod->mod_end;
     if ( start >= end )
         return NULL;
-
-    if ( end <= BOOTSTRAP_MAP_BASE )
-        return (void *)(unsigned long)start;
 
     ret = (void *)(map_cur + (unsigned long)(start & mask));
     start &= ~mask;
@@ -658,7 +650,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     /* Critical region without IDT or TSS.  Any fault is deadly! */
 
     set_processor_id(0);
-    set_current((struct vcpu *)0xfffff000); /* debug sanity. */
+    set_current(INVALID_VCPU); /* debug sanity. */
     idle_vcpu[0] = current;
 
     percpu_init_areas();
@@ -715,6 +707,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     printk("Bootloader: %s\n", loader);
 
     printk("Command line: %s\n", cmdline);
+
+    printk("Xen image load base address: %#lx\n", xen_phys_start);
 
     printk("Video information:\n");
 
@@ -787,14 +781,17 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     }
     else if ( efi_enabled(EFI_BOOT) )
         memmap_type = "EFI";
-    else if ( e820_raw_nr != 0 )
+    else if ( (e820_raw.nr_map = 
+                   copy_bios_e820(e820_raw.map,
+                                  ARRAY_SIZE(e820_raw.map))) != 0 )
     {
         memmap_type = "Xen-e820";
     }
     else if ( mbi->flags & MBI_MEMMAP )
     {
         memmap_type = "Multiboot-e820";
-        while ( (bytes < mbi->mmap_length) && (e820_raw_nr < E820MAX) )
+        while ( bytes < mbi->mmap_length &&
+                e820_raw.nr_map < ARRAY_SIZE(e820_raw.map) )
         {
             memory_map_t *map = __va(mbi->mmap_addr + bytes);
 
@@ -818,12 +815,12 @@ void __init noreturn __start_xen(unsigned long mbi_p)
                 map->length_high = 0;
             }
 
-            e820_raw[e820_raw_nr].addr = 
+            e820_raw.map[e820_raw.nr_map].addr =
                 ((u64)map->base_addr_high << 32) | (u64)map->base_addr_low;
-            e820_raw[e820_raw_nr].size = 
+            e820_raw.map[e820_raw.nr_map].size =
                 ((u64)map->length_high << 32) | (u64)map->length_low;
-            e820_raw[e820_raw_nr].type = map->type;
-            e820_raw_nr++;
+            e820_raw.map[e820_raw.nr_map].type = map->type;
+            e820_raw.nr_map++;
 
             bytes += map->size + 4;
         }
@@ -831,30 +828,30 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     else if ( bootsym(lowmem_kb) )
     {
         memmap_type = "Xen-e801";
-        e820_raw[0].addr = 0;
-        e820_raw[0].size = bootsym(lowmem_kb) << 10;
-        e820_raw[0].type = E820_RAM;
-        e820_raw[1].addr = 0x100000;
-        e820_raw[1].size = bootsym(highmem_kb) << 10;
-        e820_raw[1].type = E820_RAM;
-        e820_raw_nr = 2;
+        e820_raw.map[0].addr = 0;
+        e820_raw.map[0].size = bootsym(lowmem_kb) << 10;
+        e820_raw.map[0].type = E820_RAM;
+        e820_raw.map[1].addr = 0x100000;
+        e820_raw.map[1].size = bootsym(highmem_kb) << 10;
+        e820_raw.map[1].type = E820_RAM;
+        e820_raw.nr_map = 2;
     }
     else if ( mbi->flags & MBI_MEMLIMITS )
     {
         memmap_type = "Multiboot-e801";
-        e820_raw[0].addr = 0;
-        e820_raw[0].size = mbi->mem_lower << 10;
-        e820_raw[0].type = E820_RAM;
-        e820_raw[1].addr = 0x100000;
-        e820_raw[1].size = mbi->mem_upper << 10;
-        e820_raw[1].type = E820_RAM;
-        e820_raw_nr = 2;
+        e820_raw.map[0].addr = 0;
+        e820_raw.map[0].size = mbi->mem_lower << 10;
+        e820_raw.map[0].type = E820_RAM;
+        e820_raw.map[1].addr = 0x100000;
+        e820_raw.map[1].size = mbi->mem_upper << 10;
+        e820_raw.map[1].type = E820_RAM;
+        e820_raw.nr_map = 2;
     }
     else
         panic("Bootloader provided no memory information.");
 
     /* Sanitise the raw E820 map to produce a final clean version. */
-    max_page = raw_max_page = init_e820(memmap_type, e820_raw, &e820_raw_nr);
+    max_page = raw_max_page = init_e820(memmap_type, &e820_raw);
 
     /* Create a temporary copy of the E820 map. */
     memcpy(&boot_e820, &e820, sizeof(e820));
@@ -892,6 +889,16 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         mod[i].reserved = 0;
     }
 
+    if ( efi_enabled(EFI_LOADER) )
+    {
+        /*
+         * This needs to remain in sync with xen_in_range() and the
+         * respective reserve_e820_ram() invocation below.
+         */
+        mod[mbi->mods_count].mod_start = virt_to_mfn(_stext);
+        mod[mbi->mods_count].mod_end = __2M_rwdata_end - _stext;
+    }
+
     modules_headroom = bzimage_headroom(bootstrap_map(mod), mod->mod_end);
     bootstrap_map(NULL);
 
@@ -927,7 +934,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
                      1UL << (PAGE_SHIFT + 32)) )
             e = min(HYPERVISOR_VIRT_END - DIRECTMAP_VIRT_START,
                     1UL << (PAGE_SHIFT + 32));
-#define reloc_size ((__pa(&_end) + mask) & ~mask)
+#define reloc_size ((__pa(__2M_rwdata_end) + mask) & ~mask)
         /* Is the region suitable for relocating Xen? */
         if ( !xen_phys_start && e <= limit )
         {
@@ -943,7 +950,6 @@ void __init noreturn __start_xen(unsigned long mbi_p)
             l4_pgentry_t *pl4e;
             l3_pgentry_t *pl3e;
             l2_pgentry_t *pl2e;
-            uint64_t load_start;
             int i, j, k;
 
             /* Select relocation address. */
@@ -957,9 +963,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
              * with a barrier(). After this we must *not* modify static/global
              * data until after we have switched to the relocated pagetables!
              */
-            load_start = (unsigned long)_start - XEN_VIRT_START;
             barrier();
-            move_memory(e + load_start, load_start, _end - _start, 1);
+            move_memory(e + XEN_IMG_OFFSET, XEN_IMG_OFFSET, _end - _start, 1);
 
             /* Walk initial pagetables, relocating page directory entries. */
             pl4e = __va(__pa(idle_pg_table));
@@ -975,7 +980,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
                     /* Not present, 1GB mapping, or already relocated? */
                     if ( !(l3e_get_flags(*pl3e) & _PAGE_PRESENT) ||
                          (l3e_get_flags(*pl3e) & _PAGE_PSE) ||
-                         (l3e_get_pfn(*pl3e) > 0x1000) )
+                         (l3e_get_pfn(*pl3e) > PFN_DOWN(xen_phys_start)) )
                         continue;
                     *pl3e = l3e_from_intpte(l3e_get_intpte(*pl3e) +
                                             xen_phys_start);
@@ -985,7 +990,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
                         /* Not present, PSE, or already relocated? */
                         if ( !(l2e_get_flags(*pl2e) & _PAGE_PRESENT) ||
                              (l2e_get_flags(*pl2e) & _PAGE_PSE) ||
-                             (l2e_get_pfn(*pl2e) > 0x1000) )
+                             (l2e_get_pfn(*pl2e) > PFN_DOWN(xen_phys_start)) )
                             continue;
                         *pl2e = l2e_from_intpte(l2e_get_intpte(*pl2e) +
                                                 xen_phys_start);
@@ -999,7 +1004,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
              * Undo the temporary-hooking of the l1_identmap.  __2M_text_start
              * is contained in this PTE.
              */
-            BUG_ON(l2_table_offset((unsigned long)_erodata) ==
+            BUG_ON(using_2M_mapping() &&
+                   l2_table_offset((unsigned long)_erodata) ==
                    l2_table_offset((unsigned long)_stext));
             *pl2e++ = l2e_from_pfn(xen_phys_start >> PAGE_SHIFT,
                                    PAGE_HYPERVISOR_RX | _PAGE_PSE);
@@ -1007,7 +1013,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
             {
                 unsigned int flags;
 
-                if ( !(l2e_get_flags(*pl2e) & _PAGE_PRESENT) )
+                if ( !(l2e_get_flags(*pl2e) & _PAGE_PRESENT) ||
+                     (l2e_get_pfn(*pl2e) > PFN_DOWN(xen_phys_start)) )
                     continue;
 
                 if ( !using_2M_mapping() )
@@ -1061,6 +1068,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
                 : "memory" );
 
             bootstrap_map(NULL);
+
+            printk("New Xen image base address: %#lx\n", xen_phys_start);
         }
 
         /* Is the region suitable for relocating the multiboot modules? */
@@ -1072,8 +1081,10 @@ void __init noreturn __start_xen(unsigned long mbi_p)
             if ( mod[j].reserved )
                 continue;
 
-            /* Don't overlap with other modules. */
-            end = consider_modules(s, e, size, mod, mbi->mods_count, j);
+            /* Don't overlap with other modules (or Xen itself). */
+            end = consider_modules(s, e, size, mod,
+                                   mbi->mods_count + efi_enabled(EFI_LOADER),
+                                   j);
 
             if ( highmem_start && end > highmem_start )
                 continue;
@@ -1098,9 +1109,9 @@ void __init noreturn __start_xen(unsigned long mbi_p)
          */
         while ( !kexec_crash_area.start )
         {
-            /* Don't overlap with modules. */
-            e = consider_modules(s, e, PAGE_ALIGN(kexec_crash_area.size),
-                                 mod, mbi->mods_count, -1);
+            /* Don't overlap with modules (or Xen itself). */
+            e = consider_modules(s, e, PAGE_ALIGN(kexec_crash_area.size), mod,
+                                 mbi->mods_count + efi_enabled(EFI_LOADER), -1);
             if ( s >= e )
                 break;
             if ( e > kexec_crash_area_limit )
@@ -1124,8 +1135,9 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     if ( !xen_phys_start )
         panic("Not enough memory to relocate Xen.");
-    reserve_e820_ram(&boot_e820, efi_enabled(EFI_LOADER) ? mbi->mem_upper : __pa(&_start),
-                     __pa(&_end));
+
+    /* This needs to remain in sync with xen_in_range(). */
+    reserve_e820_ram(&boot_e820, __pa(_stext), __pa(__2M_rwdata_end));
 
     /* Late kexec reservation (dynamic start address). */
     kexec_reserve_area(&boot_e820);
@@ -1377,8 +1389,13 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         end_boot_allocator();
 
     system_state = SYS_STATE_boot;
-
+    /*
+     * No calls involving ACPI code should go between the setting of
+     * SYS_STATE_boot and vm_init() (or else acpi_os_{,un}map_memory()
+     * will break).
+     */
     vm_init();
+
     console_init_ring();
     vesa_init();
 
@@ -1443,6 +1460,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     microcode_grab_module(module_map, mbi, bootstrap_map);
 
     timer_init();
+
+    early_microcode_init();
 
     identify_cpu(&boot_cpu_data);
 
@@ -1542,8 +1561,13 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     init_guest_cpuid();
 
-    if ( opt_dom0pvh )
-        domcr_flags |= DOMCRF_pvh | DOMCRF_hap;
+    if ( dom0_pvh )
+    {
+        domcr_flags |= DOMCRF_hvm |
+                       ((hvm_funcs.hap_supported && !opt_dom0_shadow) ?
+                         DOMCRF_hap : 0);
+        config.emulation_flags = XEN_X86_EMU_LAPIC|XEN_X86_EMU_IOAPIC;
+    }
 
     /* Create initial domain 0. */
     dom0 = domain_create(0, domcr_flags, 0, &config);
@@ -1674,7 +1698,7 @@ int __hwdom_init xen_in_range(unsigned long mfn)
     paddr_t start, end;
     int i;
 
-    enum { region_s3, region_text, region_bss, nr_regions };
+    enum { region_s3, region_ro, region_rw, nr_regions };
     static struct {
         paddr_t s, e;
     } xen_regions[nr_regions] __hwdom_initdata;
@@ -1685,12 +1709,20 @@ int __hwdom_init xen_in_range(unsigned long mfn)
         /* S3 resume code (and other real mode trampoline code) */
         xen_regions[region_s3].s = bootsym_phys(trampoline_start);
         xen_regions[region_s3].e = bootsym_phys(trampoline_end);
-        /* hypervisor code + data */
-        xen_regions[region_text].s =__pa(&_stext);
-        xen_regions[region_text].e = __pa(&__init_begin);
-        /* bss */
-        xen_regions[region_bss].s = __pa(&__bss_start);
-        xen_regions[region_bss].e = __pa(&__bss_end);
+
+        /*
+         * This needs to remain in sync with the uses of the same symbols in
+         * - __start_xen() (above)
+         * - is_xen_fixed_mfn()
+         * - tboot_shutdown()
+         */
+
+        /* hypervisor .text + .rodata */
+        xen_regions[region_ro].s = __pa(&_stext);
+        xen_regions[region_ro].e = __pa(&__2M_rodata_end);
+        /* hypervisor .data + .bss */
+        xen_regions[region_rw].s = __pa(&__2M_rwdata_start);
+        xen_regions[region_rw].e = __pa(&__2M_rwdata_end);
     }
 
     start = (paddr_t)mfn << PAGE_SHIFT;
@@ -1719,7 +1751,7 @@ void __hwdom_init setup_io_bitmap(struct domain *d)
 {
     int rc;
 
-    if ( has_hvm_container_domain(d) )
+    if ( is_hvm_domain(d) )
     {
         bitmap_fill(d->arch.hvm_domain.io_bitmap, 0x10000);
         rc = rangeset_report_ranges(d->arch.ioport_caps, 0, 0x10000,

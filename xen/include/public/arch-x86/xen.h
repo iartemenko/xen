@@ -58,15 +58,15 @@
 
 #if defined(__i386__)
 # ifdef __XEN__
-__DeFiNe__ __DECL_REG_LO8(which) uint32_t _e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) union { uint32_t e ## name, _e ## name; }
+__DeFiNe__ __DECL_REG_LO8(which) uint32_t e ## which ## x
+__DeFiNe__ __DECL_REG_LO16(name) union { uint32_t e ## name; }
 # endif
 #include "xen-x86_32.h"
 # ifdef __XEN__
 __UnDeF__ __DECL_REG_LO8
 __UnDeF__ __DECL_REG_LO16
-__DeFiNe__ __DECL_REG_LO8(which) _e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) _e ## name
+__DeFiNe__ __DECL_REG_LO8(which) e ## which ## x
+__DeFiNe__ __DECL_REG_LO16(name) e ## name
 # endif
 #elif defined(__x86_64__)
 #include "xen-x86_64.h"
@@ -159,10 +159,10 @@ DEFINE_XEN_GUEST_HANDLE(trap_info_t);
 typedef uint64_t tsc_timestamp_t; /* RDTSC timestamp */
 
 /*
- * The following is all CPU context. Note that the fpu_ctxt block is filled 
+ * The following is all CPU context. Note that the fpu_ctxt block is filled
  * in by FXSAVE if the CPU has feature FXSR; otherwise FSAVE is used.
  *
- * Also note that when calling DOMCTL_setvcpucontext and VCPU_initialise
+ * Also note that when calling DOMCTL_setvcpucontext and VCPUOP_initialise
  * for HVM and PVH guests, not all information in this structure is updated:
  *
  * - For HVM guests, the structures read include: fpu_ctxt (if
@@ -293,12 +293,14 @@ struct xen_arch_domainconfig {
 #define XEN_X86_EMU_IOMMU           (1U<<_XEN_X86_EMU_IOMMU)
 #define _XEN_X86_EMU_PIT            8
 #define XEN_X86_EMU_PIT             (1U<<_XEN_X86_EMU_PIT)
+#define _XEN_X86_EMU_USE_PIRQ       9
+#define XEN_X86_EMU_USE_PIRQ        (1U<<_XEN_X86_EMU_USE_PIRQ)
 
 #define XEN_X86_EMU_ALL             (XEN_X86_EMU_LAPIC | XEN_X86_EMU_HPET |  \
                                      XEN_X86_EMU_PM | XEN_X86_EMU_RTC |      \
                                      XEN_X86_EMU_IOAPIC | XEN_X86_EMU_PIC |  \
                                      XEN_X86_EMU_VGA | XEN_X86_EMU_IOMMU |   \
-                                     XEN_X86_EMU_PIT)
+                                     XEN_X86_EMU_PIT | XEN_X86_EMU_USE_PIRQ)
     uint32_t emulation_flags;
 };
 

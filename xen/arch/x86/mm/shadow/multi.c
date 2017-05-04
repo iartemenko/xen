@@ -171,7 +171,7 @@ delete_shadow_status(struct domain *d, mfn_t gmfn, u32 shadow_type, mfn_t smfn)
 /**************************************************************************/
 /* Functions for walking the guest page tables */
 
-static inline uint32_t
+static inline bool
 sh_walk_guest_tables(struct vcpu *v, unsigned long va, walk_t *gw,
                      uint32_t pfec)
 {
@@ -238,7 +238,7 @@ shadow_check_gwalk(struct vcpu *v, unsigned long va, walk_t *gw, int version)
     l2p = (guest_l2e_t *)v->arch.paging.shadow.guest_vtable;
     mismatch |= (gw->l2e.l2 != l2p[guest_l2_table_offset(va)].l2);
 #endif
-    if ( !(guest_supports_superpages(v) &&
+    if ( !(guest_can_use_l2_superpages(v) &&
            (guest_l2e_get_flags(gw->l2e) & _PAGE_PSE)) )
     {
         l1p = map_domain_page(gw->l1mfn);
@@ -310,7 +310,7 @@ gw_remove_write_accesses(struct vcpu *v, unsigned long va, walk_t *gw)
         rc |= GW_RMWR_FLUSHTLB;
 #endif /* GUEST_PAGING_LEVELS >= 3 */
 
-    if ( !(guest_supports_superpages(v) &&
+    if ( !(guest_can_use_l2_superpages(v) &&
            (guest_l2e_get_flags(gw->l2e) & _PAGE_PSE))
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
          && !mfn_is_out_of_sync(gw->l1mfn)
@@ -537,7 +537,7 @@ _sh_propagate(struct vcpu *v,
 
     /* Check there's something for the shadows to map to */
     if ( (!p2m_is_valid(p2mt) && !p2m_is_grant(p2mt))
-         || gfn_x(target_gfn) >> d->arch.paging.gfn_bits )
+         || !gfn_valid(d, target_gfn) )
     {
         *sp = shadow_l1e_empty();
         goto done;
@@ -591,7 +591,7 @@ _sh_propagate(struct vcpu *v,
     //
     pass_thru_flags = (_PAGE_ACCESSED | _PAGE_USER |
                        _PAGE_RW | _PAGE_PRESENT);
-    if ( guest_supports_nx(v) )
+    if ( guest_nx_enabled(v) )
         pass_thru_flags |= _PAGE_NX_BIT;
     if ( level == 1 && !shadow_mode_refcounts(d) && mmio_mfn )
         pass_thru_flags |= _PAGE_PAT | _PAGE_PCD | _PAGE_PWT;
@@ -660,7 +660,7 @@ _sh_propagate(struct vcpu *v,
     if ( unlikely(((level == 1) ||
                    ((level == 2) &&
                     (gflags & _PAGE_PSE) &&
-                    guest_supports_superpages(v)))
+                    guest_can_use_l2_superpages(v)))
                   && !(gflags & _PAGE_DIRTY)) )
         sflags &= ~_PAGE_RW;
 
@@ -745,6 +745,10 @@ l4e_propagate_from_guest(struct vcpu *v,
                          shadow_l4e_t *sl4e,
                          fetch_type_t ft)
 {
+    if ( !mfn_eq(sl3mfn, INVALID_MFN) &&
+         (guest_l4e_get_flags(gl4e) & _PAGE_PRESENT) )
+        ASSERT(!guest_l4e_rsvd_bits(v, gl4e));
+
     _sh_propagate(v, gl4e.l4, sl3mfn, sl4e, 4, ft, p2m_ram_rw);
 }
 
@@ -755,6 +759,10 @@ l3e_propagate_from_guest(struct vcpu *v,
                          shadow_l3e_t *sl3e,
                          fetch_type_t ft)
 {
+    if ( !mfn_eq(sl2mfn, INVALID_MFN) &&
+         (guest_l3e_get_flags(gl3e) & _PAGE_PRESENT) )
+        ASSERT(!guest_l3e_rsvd_bits(v, gl3e));
+
     _sh_propagate(v, gl3e.l3, sl2mfn, sl3e, 3, ft, p2m_ram_rw);
 }
 #endif // GUEST_PAGING_LEVELS >= 4
@@ -766,6 +774,10 @@ l2e_propagate_from_guest(struct vcpu *v,
                          shadow_l2e_t *sl2e,
                          fetch_type_t ft)
 {
+    if ( !mfn_eq(sl1mfn, INVALID_MFN) &&
+         (guest_l2e_get_flags(gl2e) & _PAGE_PRESENT) )
+        ASSERT(!guest_l2e_rsvd_bits(v, gl2e));
+
     _sh_propagate(v, gl2e.l2, sl1mfn, sl2e, 2, ft, p2m_ram_rw);
 }
 
@@ -777,6 +789,10 @@ l1e_propagate_from_guest(struct vcpu *v,
                          fetch_type_t ft,
                          p2m_type_t p2mt)
 {
+    if ( !mfn_eq(gmfn, INVALID_MFN) &&
+         (guest_l1e_get_flags(gl1e) & _PAGE_PRESENT) )
+        ASSERT(!guest_l1e_rsvd_bits(v, gl1e));
+
     _sh_propagate(v, gl1e.l1, gmfn, sl1e, 1, ft, p2mt);
 }
 
@@ -1846,7 +1862,7 @@ static shadow_l1e_t * shadow_get_and_create_l1e(struct vcpu *v,
         /* No l1 shadow installed: find and install it. */
         if ( !(flags & _PAGE_PRESENT) )
             return NULL; /* No guest page. */
-        if ( guest_supports_superpages(v) && (flags & _PAGE_PSE) )
+        if ( guest_can_use_l2_superpages(v) && (flags & _PAGE_PSE) )
         {
             /* Splintering a superpage */
             gfn_t l2gfn = guest_l2e_get_gfn(gw->l2e);
@@ -2157,7 +2173,8 @@ static int validate_gl4e(struct vcpu *v, void *new_ge, mfn_t sl4mfn, void *se)
 
     perfc_incr(shadow_validate_gl4e_calls);
 
-    if ( guest_l4e_get_flags(new_gl4e) & _PAGE_PRESENT )
+    if ( (guest_l4e_get_flags(new_gl4e) & _PAGE_PRESENT) &&
+         !guest_l4e_rsvd_bits(v, new_gl4e) )
     {
         gfn_t gl3gfn = guest_l4e_get_gfn(new_gl4e);
         mfn_t gl3mfn = get_gfn_query_unlocked(d, gfn_x(gl3gfn), &p2mt);
@@ -2215,7 +2232,8 @@ static int validate_gl3e(struct vcpu *v, void *new_ge, mfn_t sl3mfn, void *se)
 
     perfc_incr(shadow_validate_gl3e_calls);
 
-    if ( guest_l3e_get_flags(new_gl3e) & _PAGE_PRESENT )
+    if ( (guest_l3e_get_flags(new_gl3e) & _PAGE_PRESENT) &&
+         !guest_l3e_rsvd_bits(v, new_gl3e) )
     {
         gfn_t gl2gfn = guest_l3e_get_gfn(new_gl3e);
         mfn_t gl2mfn = get_gfn_query_unlocked(d, gfn_x(gl2gfn), &p2mt);
@@ -2248,10 +2266,11 @@ static int validate_gl2e(struct vcpu *v, void *new_ge, mfn_t sl2mfn, void *se)
 
     perfc_incr(shadow_validate_gl2e_calls);
 
-    if ( guest_l2e_get_flags(new_gl2e) & _PAGE_PRESENT )
+    if ( (guest_l2e_get_flags(new_gl2e) & _PAGE_PRESENT) &&
+         !guest_l2e_rsvd_bits(v, new_gl2e) )
     {
         gfn_t gl1gfn = guest_l2e_get_gfn(new_gl2e);
-        if ( guest_supports_superpages(v) &&
+        if ( guest_can_use_l2_superpages(v) &&
              (guest_l2e_get_flags(new_gl2e) & _PAGE_PSE) )
         {
             // superpage -- need to look up the shadow L1 which holds the
@@ -2289,8 +2308,8 @@ static int validate_gl1e(struct vcpu *v, void *new_ge, mfn_t sl1mfn, void *se)
     guest_l1e_t new_gl1e = *(guest_l1e_t *)new_ge;
     shadow_l1e_t *sl1p = se;
     gfn_t gfn;
-    mfn_t gmfn;
-    p2m_type_t p2mt;
+    mfn_t gmfn = INVALID_MFN;
+    p2m_type_t p2mt = p2m_invalid;
     int result = 0;
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
     mfn_t gl1mfn;
@@ -2298,8 +2317,12 @@ static int validate_gl1e(struct vcpu *v, void *new_ge, mfn_t sl1mfn, void *se)
 
     perfc_incr(shadow_validate_gl1e_calls);
 
-    gfn = guest_l1e_get_gfn(new_gl1e);
-    gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+    if ( (guest_l1e_get_flags(new_gl1e) & _PAGE_PRESENT) &&
+         !guest_l1e_rsvd_bits(v, new_gl1e) )
+    {
+        gfn = guest_l1e_get_gfn(new_gl1e);
+        gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+    }
 
     l1e_propagate_from_guest(v, new_gl1e, gmfn, &new_sl1e, ft_prefetch, p2mt);
     result |= shadow_set_l1e(d, sl1p, new_sl1e, p2mt, sl1mfn);
@@ -2355,12 +2378,17 @@ void sh_resync_l1(struct vcpu *v, mfn_t gl1mfn, mfn_t snpmfn)
         if ( memcmp(snpl1p, &gl1e, sizeof(gl1e)) )
         {
             gfn_t gfn;
-            mfn_t gmfn;
-            p2m_type_t p2mt;
+            mfn_t gmfn = INVALID_MFN;
+            p2m_type_t p2mt = p2m_invalid;
             shadow_l1e_t nsl1e;
 
-            gfn = guest_l1e_get_gfn(gl1e);
-            gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+            if ( (guest_l1e_get_flags(gl1e) & _PAGE_PRESENT) &&
+                 !guest_l1e_rsvd_bits(v, gl1e) )
+            {
+                gfn = guest_l1e_get_gfn(gl1e);
+                gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+            }
+
             l1e_propagate_from_guest(v, gl1e, gmfn, &nsl1e, ft_prefetch, p2mt);
             rc |= shadow_set_l1e(d, sl1p, nsl1e, p2mt, sl1mfn);
             *snpl1p = gl1e;
@@ -2686,8 +2714,17 @@ static void sh_prefetch(struct vcpu *v, walk_t *gw,
         }
 
         /* Look at the gfn that the l1e is pointing at */
-        gfn = guest_l1e_get_gfn(gl1e);
-        gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+        if ( (guest_l1e_get_flags(gl1e) & _PAGE_PRESENT) &&
+             !guest_l1e_rsvd_bits(v, gl1e) )
+        {
+            gfn = guest_l1e_get_gfn(gl1e);
+            gmfn = get_gfn_query_unlocked(d, gfn_x(gfn), &p2mt);
+        }
+        else
+        {
+            gmfn = INVALID_MFN;
+            p2mt = p2m_invalid;
+        }
 
         /* Propagate the entry.  */
         l1e_propagate_from_guest(v, gl1e, gmfn, &sl1e, ft_prefetch, p2mt);
@@ -2857,7 +2894,8 @@ static int sh_page_fault(struct vcpu *v,
     const struct x86_emulate_ops *emul_ops;
     int r;
     p2m_type_t p2mt;
-    uint32_t rc;
+    uint32_t rc, error_code;
+    bool walk_ok;
     int version;
     const struct npfec access = {
          .read_access = 1,
@@ -3011,27 +3049,84 @@ static int sh_page_fault(struct vcpu *v,
 
  rewalk:
 
+    error_code = regs->error_code;
+
+    /*
+     * When CR4.SMAP is enabled, instructions which have a side effect of
+     * accessing the system data structures (e.g. mov to %ds accessing the
+     * LDT/GDT, or int $n accessing the IDT) are known as implicit supervisor
+     * accesses.
+     *
+     * The distinction between implicit and explicit accesses form part of the
+     * determination of access rights, controlling whether the access is
+     * successful, or raises a #PF.
+     *
+     * Unfortunately, the processor throws away the implicit/explicit
+     * distinction and does not provide it to the pagefault handler
+     * (i.e. here.) in the #PF error code.  Therefore, we must try to
+     * reconstruct the lost state so it can be fed back into our pagewalk
+     * through the guest tables.
+     *
+     * User mode accesses are easy to reconstruct:
+     *
+     *   If we observe a cpl3 data fetch which was a supervisor walk, this
+     *   must have been an implicit access to a system table.
+     *
+     * Supervisor mode accesses are not easy:
+     *
+     *   In principle, we could decode the instruction under %rip and have the
+     *   instruction emulator tell us if there is an implicit access.
+     *   However, this is racy with other vcpus updating the pagetable or
+     *   rewriting the instruction stream under our feet.
+     *
+     *   Therefore, we do nothing.  (If anyone has a sensible suggestion for
+     *   how to distinguish these cases, xen-devel@ is all ears...)
+     *
+     * As a result, one specific corner case will fail.  If a guest OS with
+     * SMAP enabled ends up mapping a system table with user mappings, sets
+     * EFLAGS.AC to allow explicit accesses to user mappings, and implicitly
+     * accesses the user mapping, hardware and the shadow code will disagree
+     * on whether a #PF should be raised.
+     *
+     * Hardware raises #PF because implicit supervisor accesses to user
+     * mappings are strictly disallowed.  As we can't reconstruct the correct
+     * input, the pagewalk is performed as if it were an explicit access,
+     * which concludes that the access should have succeeded and the shadow
+     * pagetables need modifying.  The shadow pagetables are modified (to the
+     * same value), and we re-enter the guest to re-execute the instruction,
+     * which causes another #PF, and the vcpu livelocks, unable to make
+     * forward progress.
+     *
+     * In practice, this is tolerable.  No production OS will deliberately
+     * construct this corner case (as doing so would mean that a system table
+     * is directly accessable to userspace, and the OS is trivially rootable.)
+     * If this corner case comes about accidentally, then a security-relevant
+     * bug has been tickled.
+     */
+    if ( !(error_code & (PFEC_insn_fetch|PFEC_user_mode)) &&
+         (is_pv_vcpu(v) ? (regs->ss & 3) : hvm_get_cpl(v)) == 3 )
+        error_code |= PFEC_implicit;
+
     /* The walk is done in a lock-free style, with some sanity check
      * postponed after grabbing paging lock later. Those delayed checks
      * will make sure no inconsistent mapping being translated into
      * shadow page table. */
     version = atomic_read(&d->arch.paging.shadow.gtable_dirty_version);
     rmb();
-    rc = sh_walk_guest_tables(v, va, &gw, regs->error_code);
+    walk_ok = sh_walk_guest_tables(v, va, &gw, error_code);
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
     regs->error_code &= ~PFEC_page_present;
-    if ( !(rc & _PAGE_PRESENT) )
+    if ( gw.pfec & PFEC_page_present )
         regs->error_code |= PFEC_page_present;
 #endif
 
-    if ( rc != 0 )
+    if ( !walk_ok )
     {
         perfc_incr(shadow_fault_bail_real_fault);
         SHADOW_PRINTK("not a shadow fault\n");
         reset_early_unshadow(v);
-        if ( (rc & _PAGE_INVALID_BITS) )
-            regs->error_code |= PFEC_reserved_bit;
+        regs->error_code = gw.pfec & PFEC_arch_mask;
         goto propagate;
     }
 
@@ -3046,7 +3141,7 @@ static int sh_page_fault(struct vcpu *v,
     }
 
     /* What mfn is the guest trying to access? */
-    gfn = guest_l1e_get_gfn(gw.l1e);
+    gfn = guest_walk_to_gfn(&gw);
     gmfn = get_gfn(d, gfn, &p2mt);
 
     if ( shadow_mode_refcounts(d) &&
@@ -3211,8 +3306,7 @@ static int sh_page_fault(struct vcpu *v,
     }
 
     /* Need to hand off device-model MMIO to the device model */
-    if ( p2mt == p2m_mmio_dm
-         || (p2mt == p2m_ioreq_server && ft == ft_demand_write) )
+    if ( p2mt == p2m_mmio_dm )
     {
         gpa = guest_walk_to_gpa(&gw);
         goto mmio;
@@ -3363,7 +3457,7 @@ static int sh_page_fault(struct vcpu *v,
 
     r = x86_emulate(&emul_ctxt.ctxt, emul_ops);
 
-    if ( r == X86EMUL_EXCEPTION && emul_ctxt.ctxt.event_pending )
+    if ( r == X86EMUL_EXCEPTION )
     {
         /*
          * This emulation covers writes to shadow pagetables.  We tolerate #PF
@@ -3665,34 +3759,25 @@ sh_gva_to_gfn(struct vcpu *v, struct p2m_domain *p2m,
 {
     walk_t gw;
     gfn_t gfn;
-    uint32_t missing;
+    bool walk_ok;
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB)
     /* Check the vTLB cache first */
-    unsigned long vtlb_gfn = vtlb_lookup(v, va, pfec[0]);
-    if ( VALID_GFN(vtlb_gfn) )
+    unsigned long vtlb_gfn = vtlb_lookup(v, va, *pfec);
+    if ( vtlb_gfn != gfn_x(INVALID_GFN) )
         return vtlb_gfn;
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB) */
 
-    if ( (missing = sh_walk_guest_tables(v, va, &gw, pfec[0])) != 0 )
+    if ( !(walk_ok = sh_walk_guest_tables(v, va, &gw, *pfec)) )
     {
-        if ( (missing & _PAGE_PRESENT) )
-            pfec[0] &= ~PFEC_page_present;
-        if ( missing & _PAGE_INVALID_BITS )
-            pfec[0] |= PFEC_reserved_bit;
-        /*
-         * SDM Intel 64 Volume 3, Chapter Paging, PAGE-FAULT EXCEPTIONS:
-         * The PFEC_insn_fetch flag is set only when NX or SMEP are enabled.
-         */
-        if ( is_hvm_vcpu(v) && !hvm_nx_enabled(v) && !hvm_smep_enabled(v) )
-            pfec[0] &= ~PFEC_insn_fetch;
+        *pfec = gw.pfec;
         return gfn_x(INVALID_GFN);
     }
     gfn = guest_walk_to_gfn(&gw);
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB)
     /* Remember this successful VA->GFN translation for later. */
-    vtlb_insert(v, va >> PAGE_SHIFT, gfn_x(gfn), pfec[0]);
+    vtlb_insert(v, va >> PAGE_SHIFT, gfn_x(gfn), *pfec);
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB) */
 
     return gfn_x(gfn);

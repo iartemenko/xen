@@ -96,6 +96,9 @@ struct p2m_domain {
 
     /* back pointer to domain */
     struct domain *domain;
+
+    /* Keeping track on which CPU this p2m was used and for which vCPU */
+    uint8_t last_vcpu_ran[NR_CPUS];
 };
 
 /*
@@ -292,7 +295,7 @@ static inline struct page_info *get_page_from_gfn(
     if ( !p2m_is_any_ram(p2mt) )
         return NULL;
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(_mfn(mfn)) )
         return NULL;
     page = mfn_to_page(mfn);
 
@@ -314,7 +317,7 @@ static inline struct page_info *get_page_from_gfn(
 }
 
 int get_page_type(struct page_info *page, unsigned long type);
-int is_iomem_page(unsigned long mfn);
+bool is_iomem_page(mfn_t mfn);
 static inline int get_page_and_type(struct page_info *page,
                                     struct domain *domain,
                                     unsigned long type)

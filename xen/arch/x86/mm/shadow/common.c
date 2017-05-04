@@ -20,7 +20,6 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/trace.h>
@@ -49,22 +48,17 @@ static void sh_clean_dirty_bitmap(struct domain *);
  * Called for every domain from arch_domain_create() */
 int shadow_domain_init(struct domain *d, unsigned int domcr_flags)
 {
+    static const struct log_dirty_ops sh_ops = {
+        .enable  = sh_enable_log_dirty,
+        .disable = sh_disable_log_dirty,
+        .clean   = sh_clean_dirty_bitmap,
+    };
+
     INIT_PAGE_LIST_HEAD(&d->arch.paging.shadow.freelist);
     INIT_PAGE_LIST_HEAD(&d->arch.paging.shadow.pinned_shadows);
 
-    d->arch.paging.gfn_bits = paddr_bits - PAGE_SHIFT;
-#ifndef CONFIG_BIGMEM
-    /*
-     * Shadowed superpages store GFNs in 32-bit page_info fields.
-     * Note that we cannot use guest_supports_superpages() here.
-     */
-    if ( !is_pv_domain(d) || opt_allow_superpage )
-        d->arch.paging.gfn_bits = 32;
-#endif
-
     /* Use shadow pagetables for log-dirty support */
-    paging_log_dirty_init(d, sh_enable_log_dirty,
-                          sh_disable_log_dirty, sh_clean_dirty_bitmap);
+    paging_log_dirty_init(d, &sh_ops);
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
     d->arch.paging.shadow.oos_active = 0;
@@ -142,13 +136,13 @@ static struct segment_register *hvm_get_seg_reg(
     return seg_reg;
 }
 
-static int hvm_translate_linear_addr(
+static int hvm_translate_virtual_addr(
     enum x86_segment seg,
     unsigned long offset,
     unsigned int bytes,
     enum hvm_access_type access_type,
     struct sh_emulate_ctxt *sh_ctxt,
-    unsigned long *paddr)
+    unsigned long *linear)
 {
     const struct segment_register *reg;
     int okay;
@@ -158,7 +152,8 @@ static int hvm_translate_linear_addr(
         return -PTR_ERR(reg);
 
     okay = hvm_virtual_to_linear_addr(
-        seg, reg, offset, bytes, access_type, sh_ctxt->ctxt.addr_size, paddr);
+        seg, reg, offset, bytes, access_type,
+        hvm_get_seg_reg(x86_seg_cs, sh_ctxt), linear);
 
     if ( !okay )
     {
@@ -189,7 +184,7 @@ hvm_read(enum x86_segment seg,
     unsigned long addr;
     int rc;
 
-    rc = hvm_translate_linear_addr(
+    rc = hvm_translate_virtual_addr(
         seg, offset, bytes, access_type, sh_ctxt, &addr);
     if ( rc || !bytes )
         return rc;
@@ -271,7 +266,7 @@ hvm_emulate_write(enum x86_segment seg,
     if ( seg == x86_seg_ss )
         perfc_incr(shadow_fault_emulate_stack);
 
-    rc = hvm_translate_linear_addr(
+    rc = hvm_translate_virtual_addr(
         seg, offset, bytes, hvm_access_write, sh_ctxt, &addr);
     if ( rc || !bytes )
         return rc;
@@ -297,7 +292,7 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
     if ( bytes > sizeof(long) )
         return X86EMUL_UNHANDLEABLE;
 
-    rc = hvm_translate_linear_addr(
+    rc = hvm_translate_virtual_addr(
         seg, offset, bytes, hvm_access_write, sh_ctxt, &addr);
     if ( rc )
         return rc;
@@ -325,22 +320,20 @@ const struct x86_emulate_ops *shadow_init_emulation(
     struct vcpu *v = current;
     unsigned long addr;
 
-    ASSERT(has_hvm_container_vcpu(v));
+    ASSERT(is_hvm_vcpu(v));
 
     memset(sh_ctxt, 0, sizeof(*sh_ctxt));
 
     sh_ctxt->ctxt.regs = regs;
     sh_ctxt->ctxt.vendor = v->domain->arch.cpuid->x86_vendor;
-    sh_ctxt->ctxt.swint_emulate = x86_swint_emulate_none;
+    sh_ctxt->ctxt.lma = hvm_long_mode_active(v);
 
     /* Segment cache initialisation. Primed with CS. */
     creg = hvm_get_seg_reg(x86_seg_cs, sh_ctxt);
 
     /* Work out the emulation mode. */
-    if ( hvm_long_mode_enabled(v) && creg->attr.fields.l )
-    {
+    if ( sh_ctxt->ctxt.lma && creg->attr.fields.l )
         sh_ctxt->ctxt.addr_size = sh_ctxt->ctxt.sp_size = 64;
-    }
     else
     {
         sreg = hvm_get_seg_reg(x86_seg_ss, sh_ctxt);
@@ -351,7 +344,7 @@ const struct x86_emulate_ops *shadow_init_emulation(
     /* Attempt to prefetch whole instruction. */
     sh_ctxt->insn_buf_eip = regs->rip;
     sh_ctxt->insn_buf_bytes =
-        (!hvm_translate_linear_addr(
+        (!hvm_translate_virtual_addr(
             x86_seg_cs, regs->rip, sizeof(sh_ctxt->insn_buf),
             hvm_access_insn_fetch, sh_ctxt, &addr) &&
          !hvm_fetch_from_guest_linear(
@@ -369,7 +362,7 @@ void shadow_continue_emulation(struct sh_emulate_ctxt *sh_ctxt,
     struct vcpu *v = current;
     unsigned long addr, diff;
 
-    ASSERT(has_hvm_container_vcpu(v));
+    ASSERT(is_hvm_vcpu(v));
 
     /*
      * We don't refetch the segment bases, because we don't emulate
@@ -380,7 +373,7 @@ void shadow_continue_emulation(struct sh_emulate_ctxt *sh_ctxt,
     {
         /* Prefetch more bytes. */
         sh_ctxt->insn_buf_bytes =
-            (!hvm_translate_linear_addr(
+            (!hvm_translate_virtual_addr(
                 x86_seg_cs, regs->rip, sizeof(sh_ctxt->insn_buf),
                 hvm_access_insn_fetch, sh_ctxt, &addr) &&
              !hvm_fetch_from_guest_linear(
@@ -1706,9 +1699,8 @@ void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
 
 #ifndef NDEBUG
     /* We don't emulate user-mode writes to page tables. */
-    if ( has_hvm_container_domain(d)
-         ? hvm_get_cpl(v) == 3
-         : !guest_kernel_mode(v, guest_cpu_user_regs()) )
+    if ( is_hvm_domain(d) ? hvm_get_cpl(v) == 3
+                          : !guest_kernel_mode(v, guest_cpu_user_regs()) )
     {
         gdprintk(XENLOG_DEBUG, "User-mode write to pagetable reached "
                  "emulate_map_dest(). This should never happen!\n");
@@ -2928,7 +2920,7 @@ static void sh_update_paging_modes(struct vcpu *v)
             v->arch.guest_table = d->arch.paging.shadow.unpaged_pagetable;
             v->arch.paging.mode = &SHADOW_INTERNAL_NAME(sh_paging_mode, 2);
         }
-        else if ( hvm_long_mode_enabled(v) )
+        else if ( hvm_long_mode_active(v) )
         {
             // long mode guest...
             v->arch.paging.mode =
@@ -3064,7 +3056,7 @@ int shadow_enable(struct domain *d, u32 mode)
     unsigned int old_pages;
     struct page_info *pg = NULL;
     uint32_t *e;
-    int i, rv = 0;
+    int rv = 0;
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
 
     mode |= PG_SH_enable;
@@ -3120,10 +3112,7 @@ int shadow_enable(struct domain *d, u32 mode)
         /* Fill it with 32-bit, non-PAE superpage entries, each mapping 4MB
          * of virtual address space onto the same physical address range */
         e = __map_domain_page(pg);
-        for ( i = 0; i < PAGE_SIZE / sizeof(*e); i++ )
-            e[i] = ((0x400000U * i)
-                    | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER
-                    | _PAGE_ACCESSED | _PAGE_DIRTY | _PAGE_PSE);
+        write_32bit_pse_identmap(e);
         unmap_domain_page(e);
         pg->u.inuse.type_info = PGT_l2_page_table | 1 | PGT_validated;
     }

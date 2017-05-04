@@ -13,7 +13,11 @@ static struct file __initdata ucode;
 static multiboot_info_t __initdata mbi = {
     .flags = MBI_MODULES | MBI_LOADERNAME
 };
-static module_t __initdata mb_modules[3];
+/*
+ * The array size needs to be one larger than the number of modules we
+ * support - see __start_xen().
+ */
+static module_t __initdata mb_modules[5];
 
 static void __init edd_put_string(u8 *dst, size_t n, const char *src)
 {
@@ -101,6 +105,10 @@ static void __init relocate_trampoline(unsigned long phys)
     const s32 *trampoline_ptr;
 
     trampoline_phys = phys;
+
+    if ( !efi_enabled(EFI_LOADER) )
+        return;
+
     /* Apply relocations to trampoline. */
     for ( trampoline_ptr = __trampoline_rel_start;
           trampoline_ptr < __trampoline_rel_stop;
@@ -114,7 +122,7 @@ static void __init relocate_trampoline(unsigned long phys)
 
 static void __init place_string(u32 *addr, const char *s)
 {
-    static char *__initdata alloc = start;
+    char *alloc = NULL;
 
     if ( s && *s )
     {
@@ -122,7 +130,7 @@ static void __init place_string(u32 *addr, const char *s)
         const char *old = (char *)(long)*addr;
         size_t len2 = *addr ? strlen(old) + 1 : 0;
 
-        alloc -= len1 + len2;
+        alloc = ebmalloc(len1 + len2);
         /*
          * Insert new string before already existing one. This is needed
          * for options passed on the command line to override options from
@@ -148,8 +156,8 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
     unsigned int i;
 
     /* Populate E820 table and check trampoline area availability. */
-    e = e820map - 1;
-    for ( e820nr = i = 0; i < map_size; i += desc_size )
+    e = e820_raw.map - 1;
+    for ( e820_raw.nr_map = i = 0; i < map_size; i += desc_size )
     {
         EFI_MEMORY_DESCRIPTOR *desc = map + i;
         u64 len = desc->NumberOfPages << EFI_PAGE_SHIFT;
@@ -186,10 +194,10 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
             type = E820_NVS;
             break;
         }
-        if ( e820nr && type == e->type &&
+        if ( e820_raw.nr_map && type == e->type &&
              desc->PhysicalStart == e->addr + e->size )
             e->size += len;
-        else if ( !len || e820nr >= E820MAX )
+        else if ( !len || e820_raw.nr_map >= ARRAY_SIZE(e820_raw.map) )
             continue;
         else
         {
@@ -197,7 +205,7 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
             e->addr = desc->PhysicalStart;
             e->size = len;
             e->type = type;
-            ++e820nr;
+            ++e820_raw.nr_map;
         }
     }
 
@@ -205,12 +213,7 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
 
 static void *__init efi_arch_allocate_mmap_buffer(UINTN map_size)
 {
-    place_string(&mbi.mem_upper, NULL);
-    mbi.mem_upper -= map_size;
-    mbi.mem_upper &= -__alignof__(EFI_MEMORY_DESCRIPTOR);
-    if ( mbi.mem_upper < xen_phys_start )
-        return NULL;
-    return (void *)(long)mbi.mem_upper;
+    return ebmalloc(map_size);
 }
 
 static void __init efi_arch_pre_exit_boot(void)
@@ -555,7 +558,12 @@ static void __init efi_arch_memory_setup(void)
 
     /* Allocate space for trampoline (in first Mb). */
     cfg.addr = 0x100000;
-    cfg.size = trampoline_end - trampoline_start;
+
+    if ( efi_enabled(EFI_LOADER) )
+        cfg.size = trampoline_end - trampoline_start;
+    else
+        cfg.size = TRAMPOLINE_SPACE + TRAMPOLINE_STACK_SPACE;
+
     status = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
                                    PFN_UP(cfg.size), &cfg.addr);
     if ( status == EFI_SUCCESS )
@@ -565,6 +573,9 @@ static void __init efi_arch_memory_setup(void)
         cfg.addr = 0;
         PrintStr(L"Trampoline space cannot be allocated; will try fallback.\r\n");
     }
+
+    if ( !efi_enabled(EFI_LOADER) )
+        return;
 
     /* Initialise L2 identity-map and boot-map page table entries (16MB). */
     for ( i = 0; i < 8; ++i )
@@ -657,6 +668,41 @@ static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 }
 
 static void efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }
+
+void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+    UINTN cols, gop_mode = ~0, rows;
+
+    __set_bit(EFI_BOOT, &efi_flags);
+    __set_bit(EFI_RS, &efi_flags);
+
+    efi_init(ImageHandle, SystemTable);
+
+    efi_console_set_mode();
+
+    if ( StdOut->QueryMode(StdOut, StdOut->Mode->Mode,
+                           &cols, &rows) == EFI_SUCCESS )
+        efi_arch_console_init(cols, rows);
+
+    gop = efi_get_gop();
+
+    if ( gop )
+        gop_mode = efi_find_gop_mode(gop, 0, 0, 0);
+
+    efi_arch_edd();
+    efi_arch_cpu();
+
+    efi_tables();
+    setup_efi_pci();
+    efi_variables();
+    efi_arch_memory_setup();
+
+    if ( gop )
+        efi_set_gop_mode(gop, gop_mode);
+
+    efi_exit_boot(ImageHandle, SystemTable);
+}
 
 /*
  * Local variables:

@@ -23,7 +23,6 @@ asm(".file \"" __OBJECT_FILE__ "\"");
 
 #include <xen/domain_page.h>
 #include <xen/paging.h>
-#include <xen/config.h>
 #include <xen/sched.h>
 #include "private.h" /* for hap_gva_to_gfn_* */
 
@@ -51,7 +50,7 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     struct vcpu *v, struct p2m_domain *p2m, unsigned long cr3,
     paddr_t ga, uint32_t *pfec, unsigned int *page_order)
 {
-    uint32_t missing;
+    bool walk_ok;
     mfn_t top_mfn;
     void *top_map;
     p2m_type_t p2mt;
@@ -66,7 +65,7 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     if ( p2m_is_paging(p2mt) )
     {
         ASSERT(p2m_is_hostp2m(p2m));
-        pfec[0] = PFEC_page_paged;
+        *pfec = PFEC_page_paged;
         if ( top_page )
             put_page(top_page);
         p2m_mem_paging_populate(p2m->domain, cr3 >> PAGE_SHIFT);
@@ -74,32 +73,32 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     }
     if ( p2m_is_shared(p2mt) )
     {
-        pfec[0] = PFEC_page_shared;
+        *pfec = PFEC_page_shared;
         if ( top_page )
             put_page(top_page);
         return gfn_x(INVALID_GFN);
     }
     if ( !top_page )
     {
-        pfec[0] &= ~PFEC_page_present;
+        *pfec &= ~PFEC_page_present;
         goto out_tweak_pfec;
     }
     top_mfn = _mfn(page_to_mfn(top_page));
 
     /* Map the top-level table and call the tree-walker */
-    ASSERT(mfn_valid(mfn_x(top_mfn)));
+    ASSERT(mfn_valid(top_mfn));
     top_map = map_domain_page(top_mfn);
 #if GUEST_PAGING_LEVELS == 3
     top_map += (cr3 & ~(PAGE_MASK | 31));
 #endif
-    missing = guest_walk_tables(v, p2m, ga, &gw, pfec[0], top_mfn, top_map);
+    walk_ok = guest_walk_tables(v, p2m, ga, &gw, *pfec, top_mfn, top_map);
     unmap_domain_page(top_map);
     put_page(top_page);
 
     /* Interpret the answer */
-    if ( missing == 0 )
+    if ( walk_ok )
     {
-        gfn_t gfn = guest_l1e_get_gfn(gw.l1e);
+        gfn_t gfn = guest_walk_to_gfn(&gw);
         struct page_info *page;
         page = get_page_from_gfn_p2m(p2m->domain, p2m, gfn_x(gfn), &p2mt,
                                      NULL, P2M_ALLOC | P2M_UNSHARE);
@@ -108,13 +107,13 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
         if ( p2m_is_paging(p2mt) )
         {
             ASSERT(p2m_is_hostp2m(p2m));
-            pfec[0] = PFEC_page_paged;
+            *pfec = PFEC_page_paged;
             p2m_mem_paging_populate(p2m->domain, gfn_x(gfn));
             return gfn_x(INVALID_GFN);
         }
         if ( p2m_is_shared(p2mt) )
         {
-            pfec[0] = PFEC_page_shared;
+            *pfec = PFEC_page_shared;
             return gfn_x(INVALID_GFN);
         }
 
@@ -124,20 +123,7 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
         return gfn_x(gfn);
     }
 
-    if ( missing & _PAGE_PRESENT )
-        pfec[0] &= ~PFEC_page_present;
-
-    if ( missing & _PAGE_INVALID_BITS ) 
-        pfec[0] |= PFEC_reserved_bit;
-
-    if ( missing & _PAGE_PKEY_BITS )
-        pfec[0] |= PFEC_prot_key;
-
-    if ( missing & _PAGE_PAGED )
-        pfec[0] = PFEC_page_paged;
-
-    if ( missing & _PAGE_SHARED )
-        pfec[0] = PFEC_page_shared;
+    *pfec = gw.pfec;
 
  out_tweak_pfec:
     /*
@@ -145,7 +131,7 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
      * The PFEC_insn_fetch flag is set only when NX or SMEP are enabled.
      */
     if ( !hvm_nx_enabled(v) && !hvm_smep_enabled(v) )
-        pfec[0] &= ~PFEC_insn_fetch;
+        *pfec &= ~PFEC_insn_fetch;
 
     return gfn_x(INVALID_GFN);
 }

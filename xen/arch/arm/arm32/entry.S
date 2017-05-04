@@ -1,6 +1,6 @@
-#include <xen/config.h>
 #include <asm/asm_defns.h>
 #include <asm/regs.h>
+#include <asm/alternative.h>
 #include <public/xen.h>
 
 #define SAVE_ONE_BANKED(reg)    mrs r11, reg; str r11, [sp, #UREGS_##reg]
@@ -24,6 +24,9 @@
         add r11, sp, #UREGS_kernel_sizeof+4;                            \
         str r11, [sp, #UREGS_sp];                                       \
                                                                         \
+        mrc CP32(r11, HSR);             /* Save exception syndrome */   \
+        str r11, [sp, #UREGS_hsr];                                      \
+                                                                        \
         mrs r11, SPSR_hyp;                                              \
         str r11, [sp, #UREGS_cpsr];                                     \
         and r11, #PSR_MODE_MASK;                                        \
@@ -42,6 +45,14 @@ save_guest_regs:
         SAVE_BANKED(fiq)
         SAVE_ONE_BANKED(R8_fiq); SAVE_ONE_BANKED(R9_fiq); SAVE_ONE_BANKED(R10_fiq)
         SAVE_ONE_BANKED(R11_fiq); SAVE_ONE_BANKED(R12_fiq);
+
+        /*
+         * If the SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT has been set in the cpu
+         * feature, the checking of pending SErrors will be skipped.
+         */
+        ALTERNATIVE("nop",
+                    "b skip_check",
+                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
         /*
          * Start to check pending virtual abort in the gap of Guest -> HYP
          * world switch.
@@ -97,6 +108,7 @@ abort_guest_exit_end:
          */
         bne return_from_trap
 
+skip_check:
         mov pc, lr
 
 #define DEFINE_TRAP_ENTRY(trap)                                         \
@@ -104,6 +116,7 @@ abort_guest_exit_end:
 trap_##trap:                                                            \
         SAVE_ALL;                                                       \
         cpsie i;        /* local_irq_enable */                          \
+        cpsie a;        /* asynchronous abort enable */                 \
         adr lr, return_from_trap;                                       \
         mov r0, sp;                                                     \
         mov r11, sp;                                                    \
@@ -114,6 +127,18 @@ trap_##trap:                                                            \
         ALIGN;                                                          \
 trap_##trap:                                                            \
         SAVE_ALL;                                                       \
+        cpsie a;        /* asynchronous abort enable */                 \
+        adr lr, return_from_trap;                                       \
+        mov r0, sp;                                                     \
+        mov r11, sp;                                                    \
+        bic sp, #7; /* Align the stack pointer (noop on guest trap) */  \
+        b do_trap_##trap
+
+#define DEFINE_TRAP_ENTRY_NOABORT(trap)                                 \
+        ALIGN;                                                          \
+trap_##trap:                                                            \
+        SAVE_ALL;                                                       \
+        cpsie i;        /* local_irq_enable */                          \
         adr lr, return_from_trap;                                       \
         mov r0, sp;                                                     \
         mov r11, sp;                                                    \
@@ -134,10 +159,10 @@ GLOBAL(hyp_traps_vector)
 DEFINE_TRAP_ENTRY(undefined_instruction)
 DEFINE_TRAP_ENTRY(supervisor_call)
 DEFINE_TRAP_ENTRY(prefetch_abort)
-DEFINE_TRAP_ENTRY(data_abort)
 DEFINE_TRAP_ENTRY(hypervisor)
 DEFINE_TRAP_ENTRY_NOIRQ(irq)
 DEFINE_TRAP_ENTRY_NOIRQ(fiq)
+DEFINE_TRAP_ENTRY_NOABORT(data_abort)
 
 return_from_trap:
         mov sp, r11

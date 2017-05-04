@@ -252,7 +252,7 @@ void copy_page_sse2(void *, const void *);
  * We define non-underscored wrappers for above conversion functions. These are
  * overridden in various source files while underscored versions remain intact.
  */
-#define mfn_valid(mfn)      __mfn_valid(mfn)
+#define mfn_valid(mfn)      __mfn_valid(mfn_x(mfn))
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
 #define virt_to_maddr(va)   __virt_to_maddr((unsigned long)(va))
@@ -288,7 +288,7 @@ extern root_pgentry_t idle_pg_table[ROOT_PAGETABLE_ENTRIES];
 extern l2_pgentry_t  *compat_idle_pg_table_l2;
 extern unsigned int   m2p_compat_vstart;
 extern l2_pgentry_t l2_xenmap[L2_PAGETABLE_ENTRIES],
-    l2_bootmap[L2_PAGETABLE_ENTRIES];
+    l2_bootmap[4*L2_PAGETABLE_ENTRIES];
 extern l3_pgentry_t l3_bootmap[L3_PAGETABLE_ENTRIES];
 extern l2_pgentry_t l2_identmap[4*L2_PAGETABLE_ENTRIES];
 extern l1_pgentry_t l1_fixmap[L1_PAGETABLE_ENTRIES];
@@ -314,9 +314,6 @@ void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t);
 #define _PAGE_PSE_PAT  _AC(0x1000,U)
 #define _PAGE_AVAIL_HIGH (_AC(0x7ff, U) << 12)
 #define _PAGE_NX       (cpu_has_nx ? _PAGE_NX_BIT : 0)
-/* non-architectural flags */
-#define _PAGE_PAGED   0x2000U
-#define _PAGE_SHARED  0x4000U
 
 /*
  * Debug option: Ensure that granted mappings are not implicitly unmapped.

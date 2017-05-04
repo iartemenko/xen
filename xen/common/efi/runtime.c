@@ -56,6 +56,9 @@ UINT64 __read_mostly efi_boot_max_var_store_size;
 UINT64 __read_mostly efi_boot_remain_var_store_size;
 UINT64 __read_mostly efi_boot_max_var_size;
 
+UINT64 __read_mostly efi_apple_properties_addr;
+UINTN __read_mostly efi_apple_properties_len;
+
 /* Bit field representing available EFI features/properties. */
 unsigned int efi_flags;
 
@@ -196,6 +199,9 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
 {
     unsigned int i, n;
 
+    if ( !efi_enabled(EFI_BOOT) )
+        return -ENOSYS;
+
     switch ( idx )
     {
     case XEN_FW_EFI_VERSION:
@@ -268,6 +274,14 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
             }
         return -ESRCH;
     }
+
+    case XEN_FW_EFI_APPLE_PROPERTIES:
+        if ( !efi_apple_properties_len )
+            return -ENODATA;
+        info->apple_properties.address = efi_apple_properties_addr;
+        info->apple_properties.size = efi_apple_properties_len;
+        break;
+
     default:
         return -EINVAL;
     }
@@ -330,6 +344,12 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
     unsigned long flags;
     EFI_STATUS status = EFI_NOT_STARTED;
     int rc = 0;
+
+    if ( !efi_enabled(EFI_BOOT) )
+        return -ENOSYS;
+
+    if ( !efi_enabled(EFI_RS) )
+        return -EOPNOTSUPP;
 
     switch ( op->function )
     {

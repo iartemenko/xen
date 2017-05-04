@@ -15,8 +15,11 @@ XEN_LIBXENEVTCHN   = $(XEN_ROOT)/tools/libs/evtchn
 XEN_LIBXENGNTTAB   = $(XEN_ROOT)/tools/libs/gnttab
 XEN_LIBXENCALL     = $(XEN_ROOT)/tools/libs/call
 XEN_LIBXENFOREIGNMEMORY = $(XEN_ROOT)/tools/libs/foreignmemory
+XEN_LIBXENDEVICEMODEL = $(XEN_ROOT)/tools/libs/devicemodel
 XEN_LIBXC          = $(XEN_ROOT)/tools/libxc
 XEN_XENLIGHT       = $(XEN_ROOT)/tools/libxl
+# Currently libxlutil lives in the same directory as libxenlight
+XEN_XLUTIL         = $(XEN_XENLIGHT)
 XEN_XENSTORE       = $(XEN_ROOT)/tools/xenstore
 XEN_LIBXENSTAT     = $(XEN_ROOT)/tools/xenstat/libxenstat/src
 XEN_BLKTAP2        = $(XEN_ROOT)/tools/blktap2
@@ -29,6 +32,11 @@ XENSTORE_XENSTORED ?= y
 # A debug build of tools?
 debug ?= y
 debug_symbols ?= $(debug)
+
+# Set CONFIG_GOLANG=y in .config (or in make) to build golang
+CONFIG_GOLANG ?= n
+XEN_GOPATH        = $(XEN_ROOT)/tools/golang
+XEN_GOCODE_URL    = golang.xenproject.org
 
 ifeq ($(debug_symbols),y)
 CFLAGS += -g3
@@ -91,36 +99,38 @@ endif
 
 CFLAGS_libxentoollog = -I$(XEN_LIBXENTOOLLOG)/include $(CFLAGS_xeninclude)
 SHDEPS_libxentoollog =
-LDLIBS_libxentoollog = $(XEN_LIBXENTOOLLOG)/libxentoollog$(libextension)
-SHLIB_libxentoollog  = -Wl,-rpath-link=$(XEN_LIBXENTOOLLOG)
+LDLIBS_libxentoollog = $(SHDEPS_libxentoollog) $(XEN_LIBXENTOOLLOG)/libxentoollog$(libextension)
+SHLIB_libxentoollog  = $(SHDEPS_libxentoollog) -Wl,-rpath-link=$(XEN_LIBXENTOOLLOG)
 
 CFLAGS_libxenevtchn = -I$(XEN_LIBXENEVTCHN)/include $(CFLAGS_xeninclude)
 SHDEPS_libxenevtchn =
-LDLIBS_libxenevtchn = $(XEN_LIBXENEVTCHN)/libxenevtchn$(libextension)
-SHLIB_libxenevtchn  = -Wl,-rpath-link=$(XEN_LIBXENEVTCHN)
+LDLIBS_libxenevtchn = $(SHDEPS_libxenevtchn) $(XEN_LIBXENEVTCHN)/libxenevtchn$(libextension)
+SHLIB_libxenevtchn  = $(SHDEPS_libxenevtchn) -Wl,-rpath-link=$(XEN_LIBXENEVTCHN)
 
 CFLAGS_libxengnttab = -I$(XEN_LIBXENGNTTAB)/include $(CFLAGS_xeninclude)
 SHDEPS_libxengnttab = $(SHLIB_libxentoollog)
 LDLIBS_libxengnttab = $(SHDEPS_libxengnttab) $(XEN_LIBXENGNTTAB)/libxengnttab$(libextension)
 SHLIB_libxengnttab  = $(SHDEPS_libxengnttab) -Wl,-rpath-link=$(XEN_LIBXENGNTTAB)
 
-# xengntshr_* interfaces are actually part of libxengnttab.so
-CFLAGS_libxengntshr = -I$(XEN_LIBXENGNTTAB)/include $(CFLAGS_xeninclude)
-LDLIBS_libxengntshr = $(XEN_LIBXENGNTTAB)/libxengnttab$(libextension)
-SHLIB_libxengntshr  = -Wl,-rpath-link=$(XEN_LIBXENGNTTAB)
-
 CFLAGS_libxencall = -I$(XEN_LIBXENCALL)/include $(CFLAGS_xeninclude)
-LDLIBS_libxencall = $(XEN_LIBXENCALL)/libxencall$(libextension)
-SHLIB_libxencall  = -Wl,-rpath-link=$(XEN_LIBXENCALL)
+SHDEPS_libxencall =
+LDLIBS_libxencall = $(SHDEPS_libxencall) $(XEN_LIBXENCALL)/libxencall$(libextension)
+SHLIB_libxencall  = $(SHDEPS_libxencall) -Wl,-rpath-link=$(XEN_LIBXENCALL)
 
 CFLAGS_libxenforeignmemory = -I$(XEN_LIBXENFOREIGNMEMORY)/include $(CFLAGS_xeninclude)
-LDLIBS_libxenforeignmemory = $(XEN_LIBXENFOREIGNMEMORY)/libxenforeignmemory$(libextension)
-SHLIB_libxenforeignmemory  = -Wl,-rpath-link=$(XEN_LIBXENFOREIGNMEMORY)
+SHDEPS_libxenforeignmemory =
+LDLIBS_libxenforeignmemory = $(SHDEPS_libxenforeignmemory) $(XEN_LIBXENFOREIGNMEMORY)/libxenforeignmemory$(libextension)
+SHLIB_libxenforeignmemory  = $(SHDEPS_libxenforeignmemory) -Wl,-rpath-link=$(XEN_LIBXENFOREIGNMEMORY)
+
+CFLAGS_libxendevicemodel = -I$(XEN_LIBXENDEVICEMODEL)/include $(CFLAGS_xeninclude)
+SHDEPS_libxendevicemodel = $(SHLIB_libxentoollog) $(SHLIB_xencall)
+LDLIBS_libxendevicemodel = $(SHDEPS_libxendevicemodel) $(XEN_LIBXENDEVICEMODEL)/libxendevicemodel$(libextension)
+SHLIB_libxendevicemodel  = $(SHDEPS_libxendevicemodel) -Wl,-rpath-link=$(XEN_LIBXENDEVICEMODEL)
 
 # code which compiles against libxenctrl get __XEN_TOOLS__ and
 # therefore sees the unstable hypercall interfaces.
-CFLAGS_libxenctrl = -I$(XEN_LIBXC)/include $(CFLAGS_libxentoollog) $(CFLAGS_libxenforeignmemory) $(CFLAGS_xeninclude) -D__XEN_TOOLS__
-SHDEPS_libxenctrl = $(SHLIB_libxentoollog) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab) $(SHLIB_libxengntshr) $(SHLIB_libxencall) $(SHLIB_libxenforeignmemory)
+CFLAGS_libxenctrl = -I$(XEN_LIBXC)/include $(CFLAGS_libxentoollog) $(CFLAGS_libxenforeignmemory) $(CFLAGS_libxendevicemodel) $(CFLAGS_xeninclude) -D__XEN_TOOLS__
+SHDEPS_libxenctrl = $(SHLIB_libxentoollog) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab) $(SHLIB_libxencall) $(SHLIB_libxenforeignmemory) $(SHLIB_libxendevicemodel)
 LDLIBS_libxenctrl = $(SHDEPS_libxenctrl) $(XEN_LIBXC)/libxenctrl$(libextension)
 SHLIB_libxenctrl  = $(SHDEPS_libxenctrl) -Wl,-rpath-link=$(XEN_LIBXC)
 
@@ -131,8 +141,8 @@ SHLIB_libxenguest  = $(SHDEPS_libxenguest) -Wl,-rpath-link=$(XEN_LIBXC)
 
 CFLAGS_libxenstore = -I$(XEN_XENSTORE)/include $(CFLAGS_xeninclude)
 SHDEPS_libxenstore =
-LDLIBS_libxenstore = $(SHDEPS_libxenguest) $(XEN_XENSTORE)/libxenstore$(libextension)
-SHLIB_libxenstore  = $(SHDEPS_libxenguest) -Wl,-rpath-link=$(XEN_XENSTORE)
+LDLIBS_libxenstore = $(SHDEPS_libxenstore) $(XEN_XENSTORE)/libxenstore$(libextension)
+SHLIB_libxenstore  = $(SHDEPS_libxenstore) -Wl,-rpath-link=$(XEN_XENSTORE)
 
 CFLAGS_libxenstat  = -I$(XEN_LIBXENSTAT)
 SHDEPS_libxenstat  = $(SHLIB_libxenctrl) $(SHLIB_libxenstore)
@@ -140,7 +150,7 @@ LDLIBS_libxenstat  = $(SHDEPS_libxenstat) $(XEN_LIBXENSTAT)/libxenstat$(libexten
 SHLIB_libxenstat   = $(SHDEPS_libxenstat) -Wl,-rpath-link=$(XEN_LIBXENSTAT)
 
 CFLAGS_libxenvchan = -I$(XEN_LIBVCHAN)
-SHDEPS_libxenvchan = $(SHLIB_libxentoollog) $(SHLIB_libxenstore) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab) $(SHLIB_libxengntshr)
+SHDEPS_libxenvchan = $(SHLIB_libxentoollog) $(SHLIB_libxenstore) $(SHLIB_libxenevtchn) $(SHLIB_libxengnttab)
 LDLIBS_libxenvchan = $(SHDEPS_libxenvchan) $(XEN_LIBVCHAN)/libxenvchan$(libextension)
 SHLIB_libxenvchan  = $(SHDEPS_libxenvchan) -Wl,-rpath-link=$(XEN_LIBVCHAN)
 
@@ -171,6 +181,11 @@ CFLAGS_libxenlight = -I$(XEN_XENLIGHT) $(CFLAGS_libxenctrl) $(CFLAGS_xeninclude)
 SHDEPS_libxenlight = $(SHLIB_libxenctrl) $(SHLIB_libxenstore) $(SHLIB_libblktapctl)
 LDLIBS_libxenlight = $(SHDEPS_libxenlight) $(XEN_XENLIGHT)/libxenlight$(libextension)
 SHLIB_libxenlight  = $(SHDEPS_libxenlight) -Wl,-rpath-link=$(XEN_XENLIGHT)
+
+CFLAGS_libxlutil = -I$(XEN_XLUTIL)
+SHDEPS_libxlutil = $(SHLIB_libxenlight)
+LDLIBS_libxlutil = $(SHDEPS_libxlutil) $(XEN_XLUTIL)/libxlutil$(libextension)
+SHLIB_libxlutil  = $(SHDEPS_libxlutil) -Wl,-rpath-link=$(XEN_XLUTIL)
 
 CFLAGS += -D__XEN_INTERFACE_VERSION__=__XEN_LATEST_INTERFACE_VERSION__
 
@@ -232,3 +247,26 @@ ifeq (,$(findstring clean,$(MAKECMDGOALS)))
 $(XEN_ROOT)/config/Tools.mk:
 	$(error You have to run ./configure before building or installing the tools)
 endif
+
+PKG_CONFIG_DIR ?= $(XEN_ROOT)/tools/pkg-config
+
+$(PKG_CONFIG_DIR)/%.pc: %.pc.in Makefile
+	mkdir -p $(PKG_CONFIG_DIR)
+	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
+	     -e 's!@@prefix@@!$(PKG_CONFIG_PREFIX)!g' \
+	     -e 's!@@incdir@@!$(PKG_CONFIG_INCDIR)!g' \
+	     -e 's!@@libdir@@!$(PKG_CONFIG_LIBDIR)!g' \
+	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
+	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
+	     -e 's!@@cflagslocal@@!$(PKG_CONFIG_CFLAGS_LOCAL)!g' \
+	     -e 's!@@libsflag@@!-Wl,-rpath-link=!g' < $< > $@
+
+%.pc: %.pc.in Makefile
+	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
+	     -e 's!@@prefix@@!$(PKG_CONFIG_PREFIX)!g' \
+	     -e 's!@@incdir@@!$(PKG_CONFIG_INCDIR)!g' \
+	     -e 's!@@libdir@@!$(PKG_CONFIG_LIBDIR)!g' \
+	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
+	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
+	     -e 's!@@cflagslocal@@!!g' \
+	     -e 's!@@libsflag@@!-L!g' < $< > $@

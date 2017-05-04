@@ -5,7 +5,6 @@
  */
 #define COMPILE_OFFSETS
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/bitops.h>
@@ -28,6 +27,7 @@ void __dummy__(void)
    OFFSET(UREGS_SP, struct cpu_user_regs, sp);
    OFFSET(UREGS_PC, struct cpu_user_regs, pc);
    OFFSET(UREGS_CPSR, struct cpu_user_regs, cpsr);
+   OFFSET(UREGS_ESR_el2, struct cpu_user_regs, hsr);
 
    OFFSET(UREGS_SPSR_el1, struct cpu_user_regs, spsr_el1);
 

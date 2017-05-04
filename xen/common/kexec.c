@@ -53,6 +53,7 @@ static struct kexec_image *kexec_image[KEXEC_IMAGE_NR];
 #define KEXEC_FLAG_DEFAULT_POS   (KEXEC_IMAGE_NR + 0)
 #define KEXEC_FLAG_CRASH_POS     (KEXEC_IMAGE_NR + 1)
 #define KEXEC_FLAG_IN_PROGRESS   (KEXEC_IMAGE_NR + 2)
+#define KEXEC_FLAG_IN_HYPERCALL  (KEXEC_IMAGE_NR + 3)
 
 static unsigned long kexec_flags = 0; /* the lowest bits are for KEXEC_IMAGE... */
 
@@ -819,7 +820,6 @@ static int kexec_exec(XEN_GUEST_HANDLE_PARAM(void) uarg)
 static int kexec_swap_images(int type, struct kexec_image *new,
                              struct kexec_image **old)
 {
-    static DEFINE_SPINLOCK(kexec_lock);
     int base, bit, pos;
     int new_slot, old_slot;
 
@@ -831,23 +831,19 @@ static int kexec_swap_images(int type, struct kexec_image *new,
     if ( kexec_load_get_bits(type, &base, &bit) )
         return -EINVAL;
 
-    spin_lock(&kexec_lock);
+    ASSERT(test_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags));
 
     pos = (test_bit(bit, &kexec_flags) != 0);
     old_slot = base + pos;
     new_slot = base + !pos;
 
+    kexec_image[new_slot] = new;
     if ( new )
-    {
-        kexec_image[new_slot] = new;
         set_bit(new_slot, &kexec_flags);
-    }
     change_bit(bit, &kexec_flags);
 
     clear_bit(old_slot, &kexec_flags);
     *old = kexec_image[old_slot];
-
-    spin_unlock(&kexec_lock);
 
     return 0;
 }
@@ -1195,6 +1191,9 @@ static int do_kexec_op_internal(unsigned long op,
     if ( ret )
         return ret;
 
+    if ( test_and_set_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags) )
+        return hypercall_create_continuation(__HYPERVISOR_kexec_op, "lh", op, uarg);
+
     switch ( op )
     {
     case KEXEC_CMD_kexec_get_range:
@@ -1228,6 +1227,8 @@ static int do_kexec_op_internal(unsigned long op,
         ret = kexec_status(uarg);
         break;
     }
+
+    clear_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags);
 
     return ret;
 }

@@ -14,7 +14,6 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/compile.h>
 #include <xen/mm.h>
@@ -151,7 +150,7 @@ dbg_pv_va2mfn(dbgva_t vaddr, struct domain *dp, uint64_t pgd3val)
     DBGP2("l1t:%p l1to:%lx l1e:%lx mfn:%#"PRI_mfn"\n", l1t, l1_table_offset(vaddr),
           l1e, mfn_x(mfn));
 
-    return mfn_valid(mfn_x(mfn)) ? mfn : INVALID_MFN;
+    return mfn_valid(mfn) ? mfn : INVALID_MFN;
 }
 
 /* Returns: number of bytes remaining to be copied */
@@ -169,7 +168,7 @@ unsigned int dbg_rw_guest_mem(struct domain *dp, void * __user gaddr,
 
         pagecnt = min_t(long, PAGE_SIZE - (addr & ~PAGE_MASK), len);
 
-        mfn = (has_hvm_container_domain(dp)
+        mfn = (is_hvm_domain(dp)
                ? dbg_hvm_va2mfn(addr, dp, toaddr, &gfn)
                : dbg_pv_va2mfn(addr, dp, pgd3));
         if ( mfn_eq(mfn, INVALID_MFN) )

@@ -1079,15 +1079,16 @@ int libxl__qmp_start_replication(libxl__gc *gc, int domid, bool primary)
     return qmp_run_command(gc, domid, "xen-set-replication", args, NULL, NULL);
 }
 
-int libxl__qmp_get_replication_error(libxl__gc *gc, int domid)
+int libxl__qmp_query_xen_replication_status(libxl__gc *gc, int domid)
 {
-    return qmp_run_command(gc, domid, "xen-get-replication-error", NULL,
+    return qmp_run_command(gc, domid, "query-xen-replication-status", NULL,
                            NULL, NULL);
 }
 
-int libxl__qmp_do_checkpoint(libxl__gc *gc, int domid)
+int libxl__qmp_colo_do_checkpoint(libxl__gc *gc, int domid)
 {
-    return qmp_run_command(gc, domid, "xen-do-checkpoint", NULL, NULL, NULL);
+    return qmp_run_command(gc, domid, "xen-colo-do-checkpoint",
+                           NULL, NULL, NULL);
 }
 
 int libxl__qmp_stop_replication(libxl__gc *gc, int domid, bool primary)

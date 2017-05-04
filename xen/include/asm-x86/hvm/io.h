@@ -19,6 +19,7 @@
 #ifndef __ASM_X86_HVM_IO_H__
 #define __ASM_X86_HVM_IO_H__
 
+#include <xen/mm.h>
 #include <asm/hvm/vpic.h>
 #include <asm/hvm/vioapic.h>
 #include <public/hvm/ioreq.h>
@@ -97,8 +98,6 @@ struct hvm_io_ops {
 int hvm_process_io_intercept(const struct hvm_io_handler *handler,
                              ioreq_t *p);
 
-const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p);
-
 int hvm_io_intercept(ioreq_t *p);
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d);
@@ -150,7 +149,11 @@ void stdvga_deinit(struct domain *d);
 
 extern void hvm_dpci_msi_eoi(struct domain *d, int vector);
 
-void register_dpci_portio_handler(struct domain *d);
+/*
+ * HVM port IO handler that performs forwarding of guest IO ports into machine
+ * IO ports.
+ */
+void register_g2m_portio_handler(struct domain *d);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

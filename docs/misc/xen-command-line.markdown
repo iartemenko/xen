@@ -603,7 +603,13 @@ For example, with `dom0_max_vcpus=4-8`:
 >      8    |  8
 >     10    |  8
 
-### dom0\_mem
+### dom0\_mem (ARM)
+> `= <size>`
+
+Set the amount of memory for the initial domain (dom0). It must be
+greater than zero. This parameter is required.
+
+### dom0\_mem (x86)
 > `= List of ( min:<size> | max:<size> | <size> )`
 
 Set the amount of memory for the initial domain (dom0). If a size is
@@ -646,9 +652,6 @@ restrictions set up here. Note that the values to be specified here are
 ACPI PXM ones, not Xen internal node numbers. `relaxed` sets up vCPU
 affinities to prefer but be not limited to the specified node(s).
 
-### dom0\_shadow
-> `= <boolean>`
-
 ### dom0\_vcpus\_pin
 > `= <boolean>`
 
@@ -656,12 +659,23 @@ affinities to prefer but be not limited to the specified node(s).
 
 Pin dom0 vcpus to their respective pcpus
 
-### dom0pvh
-> `= <boolean>`
+### dom0
+> `= List of [ pvh | shadow ]`
+
+> Sub-options:
+
+> `pvh`
 
 > Default: `false`
 
-Flag that makes a 64bit dom0 boot in PVH mode. No 32bit support at present.
+Flag that makes a dom0 boot in PVHv2 mode.
+
+> `shadow`
+
+> Default: `false`
+
+Flag that makes a dom0 use shadow paging. Only works when "pvh" is
+enabled.
 
 ### dtuart (ARM)
 > `= path [:options]`
@@ -1069,11 +1083,12 @@ wait descriptor timed out', try increasing this value.
 ### iommu\_inclusive\_mapping (VT-d)
 > `= <boolean>`
 
-> Default: `false`
+> Default: `true`
 
-Use this to work around firmware issues providing correct RMRR entries. Rather
-than only mapping RAM pages for IOMMU accesses for Dom0, with this option all
-pages not marked as unusable in the E820 table will get a mapping established.
+Use this to work around firmware issues providing incorrect RMRR entries.
+Rather than only mapping RAM pages for IOMMU accesses for Dom0, with this
+option all pages not marked as unusable in the E820 table will get a mapping
+established.
 
 ### irq\_ratelimit
 > `= <integer>`
@@ -1157,6 +1172,15 @@ based interrupts. Any higher IRQs will be available for use via PCI MSI.
 
 ### maxcpus
 > `= <integer>`
+
+### max\_lpi\_bits
+> `= <integer>`
+
+Specifies the number of ARM GICv3 LPI interrupts to allocate on the host,
+presented as the number of bits needed to encode it. This must be at least
+14 and not exceed 32, and each LPI requires one byte (configuration) and
+one pending bit to be allocated.
+Defaults to 20 bits (to cover at most 1048576 interrupts).
 
 ### mce
 > `= <integer>`
@@ -1387,6 +1411,16 @@ If segment of the first device is not specified, segment zero will be used.
 If other segments are not specified, first device segment will be used.
 If a segment is specified for other than the first device and it does not match
 the one specified for the first one, an error will be reported.
+
+'start' and 'end' values are page numbers (not full physical addresses),
+in hexadecimal format (can optionally be preceded by "0x").
+
+Usage example: If device 0:0:1d.0 requires one page (0xd5d45) to be
+reserved, and device 0:0:1a.0 requires three pages (0xd5d46 thru 0xd5d48)
+to be reserved, one usage would be:
+
+rmrr=d5d45=0:0:1d.0;0xd5d46-0xd5d48=0:0:1a.0
+
 Note: grub2 requires to escape or use quotations if special characters are used,
 namely ';', refer to the grub2 documentation if multiple ranges are specified.
 
@@ -1399,7 +1433,7 @@ Map the HPET page as read only in Dom0. If disabled the page will be mapped
 with read and write permissions.
 
 ### sched
-> `= credit | credit2 | arinc653`
+> `= credit | credit2 | arinc653 | rtds | null`
 
 > Default: `sched=credit`
 
@@ -1445,6 +1479,50 @@ enabling more sockets and cores to go into deeper sleep states.
 > Default: `16kB`
 
 Set the serial transmit buffer size.
+
+### serrors (ARM)
+> `= diverse | forward | panic`
+
+> Default: `diverse`
+
+This parameter is provided to administrators to determine how the
+hypervisors handle SErrors.
+
+In order to distinguish guest-generated SErrors from hypervisor-generated
+SErrors we have to place SError checking code in every EL1 <-> EL2 paths.
+That will cause overhead on entries and exits due to dsb/isb. However, not all
+platforms need to categorize SErrors. For example, a host that is running with
+trusted guests. The administrator can confirm that all guests that are running
+on the host will not trigger such SErrors. In this case, the administrator can
+use this parameter to skip categorizing SErrors and reduce the overhead of
+dsb/isb.
+
+We provided the following 3 options to administrators to determine how the
+hypervisors handle SErrors:
+
+* `diverse`:
+  The hypervisor will distinguish guest SErrors from hypervisor SErrors.
+  The guest generated SErrors will be forwarded to guests, the hypervisor
+  generated SErrors will cause the whole system to crash.
+  It requires:
+  1. dsb/isb on all EL1 -> EL2 trap entries to categorize SErrors correctly.
+  2. dsb/isb on EL2 -> EL1 return paths to prevent slipping hypervisor
+     SErrors to guests.
+  3. dsb/isb in context switch to isolate SErrors between 2 vCPUs.
+
+* `forward`:
+  The hypervisor will not distinguish guest SErrors from hypervisor SErrors.
+  All SErrors will be forwarded to guests, except the SErrors generated when
+  the idle vCPU is running. The idle domain doesn't have the ability to handle
+  SErrors, so we have to crash the whole system when we get SErros with the
+  idle vCPU. This option will avoid most overhead of the dsb/isb, except the
+  dsb/isb in context switch which is used to isolate the SErrors between 2
+  vCPUs.
+
+* `panic`:
+  The hypervisor will not distinguish guest SErrors from hypervisor SErrors.
+  All SErrors will crash the whole system. This option will avoid all overhead
+  of the dsb/isb pairs.
 
 ### smap
 > `= <boolean> | hvm`
@@ -1513,9 +1591,6 @@ pages) must also be specified via the tbuf\_size parameter.
 > `= <boolean>`
 
 ### tmem\_compress
-> `= <boolean>`
-
-### tmem\_shared\_auth
 > `= <boolean>`
 
 ### tsc
@@ -1588,6 +1663,22 @@ The optional `keep` parameter causes Xen to continue using the vga
 console even after dom0 has been started.  The default behaviour is to
 relinquish control to dom0.
 
+### viridian-version
+> `= [<major>],[<minor>],[<build>]`
+
+> Default: `6,0,0x1772`
+
+<major>, <minor> and <build> must be integers. The values will be
+encoded in guest CPUID 0x40000002 if viridian enlightenments are enabled.
+
+### viridian-spinlock-retry-count
+> `= <integer>`
+
+> Default: `2047`
+
+Specify the maximum number of retries before an enlightened Windows
+guest will notify Xen that it has failed to acquire a spinlock.
+
 ### vpid (Intel)
 > `= <boolean>`
 
@@ -1631,6 +1722,21 @@ Note that if **watchdog** option is also specified vpmu will be turned off.
 *Warning:*
 As the virtualisation is not 100% safe, don't use the vpmu flag on
 production systems (see http://xenbits.xen.org/xsa/advisory-163.html)!
+
+### vwfi
+> `= trap | native
+
+> Default: `trap`
+
+WFI is the ARM instruction to "wait for interrupt". WFE is similar and
+means "wait for event". This option, which is ARM specific, changes the
+way guest WFI and WFE are implemented in Xen. By default, Xen traps both
+instructions. In the case of WFI, Xen blocks the guest vcpu; in the case
+of WFE, Xen yield the guest vcpu. When setting vwfi to `native`, Xen
+doesn't trap either instruction, running them in guest context. Setting
+vwfi to `native` reduces irq latency significantly. It can also lead to
+suboptimal scheduling decisions, but only when the system is
+oversubscribed (i.e., in total there are more vCPUs than pCPUs).
 
 ### watchdog
 > `= force | <boolean>`

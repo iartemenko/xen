@@ -68,7 +68,7 @@ enum hvm_copy_result {
  * address range does not map entirely onto ordinary machine memory.
  */
 enum hvm_copy_result hvm_copy_to_guest_phys(
-    paddr_t paddr, void *buf, int size);
+    paddr_t paddr, void *buf, int size, struct vcpu *v);
 enum hvm_copy_result hvm_copy_from_guest_phys(
     void *buf, paddr_t paddr, int size);
 
@@ -105,11 +105,13 @@ enum hvm_copy_result hvm_fetch_from_guest_linear(
 
 #define HVM_HCALL_completed  0 /* hypercall completed - no further action */
 #define HVM_HCALL_preempted  1 /* hypercall preempted - re-execute VMCALL */
-#define HVM_HCALL_invalidate 2 /* invalidate ioemu-dm memory cache        */
-int hvm_do_hypercall(struct cpu_user_regs *pregs);
+int hvm_hypercall(struct cpu_user_regs *regs);
 
 void hvm_hlt(unsigned int eflags);
 void hvm_triple_fault(void);
+
+#define VM86_TSS_UPDATED (1ULL << 63)
+void hvm_prepare_vm86_tss(struct vcpu *v, uint32_t base, uint32_t limit);
 
 void hvm_rdtsc_intercept(struct cpu_user_regs *regs);
 
@@ -117,17 +119,30 @@ int __must_check hvm_handle_xsetbv(u32 index, u64 new_bv);
 
 void hvm_shadow_handle_cd(struct vcpu *v, unsigned long value);
 
-/* These functions all return X86EMUL return codes. */
+/*
+ * These functions all return X86EMUL return codes.  For hvm_set_*(), the
+ * caller is responsible for injecting #GP[0] if X86EMUL_EXCEPTION is
+ * returned.
+ */
 int hvm_set_efer(uint64_t value);
 int hvm_set_cr0(unsigned long value, bool_t may_defer);
 int hvm_set_cr3(unsigned long value, bool_t may_defer);
 int hvm_set_cr4(unsigned long value, bool_t may_defer);
-int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content);
-int hvm_msr_write_intercept(
-    unsigned int msr, uint64_t msr_content, bool_t may_defer);
+int hvm_descriptor_access_intercept(uint64_t exit_info,
+                                    uint64_t vmx_exit_qualification,
+                                    unsigned int descriptor, bool is_write);
 int hvm_mov_to_cr(unsigned int cr, unsigned int gpr);
 int hvm_mov_from_cr(unsigned int cr, unsigned int gpr);
 void hvm_ud_intercept(struct cpu_user_regs *);
+
+/*
+ * May return X86EMUL_EXCEPTION, at which point the caller is responsible for
+ * injecting a #GP fault.  Used to support speculative reads.
+ */
+int __must_check hvm_msr_read_intercept(
+    unsigned int msr, uint64_t *msr_content);
+int __must_check hvm_msr_write_intercept(
+    unsigned int msr, uint64_t msr_content, bool_t may_defer);
 
 #endif /* __ASM_X86_HVM_SUPPORT_H__ */
 

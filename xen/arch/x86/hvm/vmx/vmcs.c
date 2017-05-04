@@ -15,7 +15,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
@@ -227,6 +226,7 @@ static int vmx_init_vmcs_config(void)
         opt = (SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES |
                SECONDARY_EXEC_WBINVD_EXITING |
                SECONDARY_EXEC_ENABLE_EPT |
+               SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING |
                SECONDARY_EXEC_ENABLE_RDTSCP |
                SECONDARY_EXEC_PAUSE_LOOP_EXITING |
                SECONDARY_EXEC_ENABLE_INVPCID |
@@ -552,6 +552,20 @@ static void vmx_load_vmcs(struct vcpu *v)
     local_irq_restore(flags);
 }
 
+void vmx_vmcs_reload(struct vcpu *v)
+{
+    /*
+     * As we may be running with interrupts disabled, we can't acquire
+     * v->arch.hvm_vmx.vmcs_lock here. However, with interrupts disabled
+     * the VMCS can't be taken away from us anymore if we still own it.
+     */
+    ASSERT(v->is_running || !local_irq_is_enabled());
+    if ( v->arch.hvm_vmx.vmcs_pa == this_cpu(current_vmcs) )
+        return;
+
+    vmx_load_vmcs(v);
+}
+
 int vmx_cpu_up_prepare(unsigned int cpu)
 {
     /*
@@ -578,6 +592,7 @@ void vmx_cpu_dead(unsigned int cpu)
     vmx_free_vmcs(per_cpu(vmxon_region, cpu));
     per_cpu(vmxon_region, cpu) = 0;
     nvmx_cpu_dead(cpu);
+    vmx_pi_desc_fixup(cpu);
 }
 
 int vmx_cpu_up(void)
@@ -587,8 +602,6 @@ int vmx_cpu_up(void)
     u64 cr0, vmx_cr0_fixed0, vmx_cr0_fixed1;
 
     BUG_ON(!(read_cr4() & X86_CR4_VMXE));
-
-    vmx_save_host_msrs();
 
     /* 
      * Ensure the current processor operating mode meets 
@@ -757,7 +770,7 @@ void vmx_vmcs_exit(struct vcpu *v)
     {
         /* Don't confuse vmx_do_resume (for @v or @current!) */
         vmx_clear_vmcs(v);
-        if ( has_hvm_container_vcpu(current) )
+        if ( is_hvm_vcpu(current) )
             vmx_load_vmcs(current);
 
         spin_unlock(&v->arch.hvm_vmx.vmcs_lock);
@@ -943,11 +956,35 @@ u64 virtual_vmcs_vmread(const struct vcpu *v, u32 vmcs_encoding)
     return res;
 }
 
+enum vmx_insn_errno virtual_vmcs_vmread_safe(const struct vcpu *v,
+                                             u32 vmcs_encoding, u64 *val)
+{
+    enum vmx_insn_errno ret;
+
+    virtual_vmcs_enter(v);
+    ret = vmread_safe(vmcs_encoding, val);
+    virtual_vmcs_exit(v);
+
+    return ret;
+}
+
 void virtual_vmcs_vmwrite(const struct vcpu *v, u32 vmcs_encoding, u64 val)
 {
     virtual_vmcs_enter(v);
     __vmwrite(vmcs_encoding, val);
     virtual_vmcs_exit(v);
+}
+
+enum vmx_insn_errno virtual_vmcs_vmwrite_safe(const struct vcpu *v,
+                                              u32 vmcs_encoding, u64 val)
+{
+    enum vmx_insn_errno ret;
+
+    virtual_vmcs_enter(v);
+    ret = vmwrite_safe(vmcs_encoding, val);
+    virtual_vmcs_exit(v);
+
+    return ret;
 }
 
 /*
@@ -956,16 +993,13 @@ void virtual_vmcs_vmwrite(const struct vcpu *v, u32 vmcs_encoding, u64 val)
  */
 static void pi_desc_init(struct vcpu *v)
 {
-    uint32_t dest;
-
     v->arch.hvm_vmx.pi_desc.nv = posted_intr_vector;
 
-    dest = cpu_physical_id(v->processor);
-
-    if ( x2apic_enabled )
-        v->arch.hvm_vmx.pi_desc.ndst = dest;
-    else
-        v->arch.hvm_vmx.pi_desc.ndst = MASK_INSR(dest, PI_xAPIC_NDST_MASK);
+    /*
+     * Mark NDST as invalid, then we can use this invalid value as a
+     * marker to whether update NDST or not in vmx_pi_hooks_assign().
+     */
+    v->arch.hvm_vmx.pi_desc.ndst = APIC_INVALID_DEST;
 }
 
 static int construct_vmcs(struct vcpu *v)
@@ -986,6 +1020,13 @@ static int construct_vmcs(struct vcpu *v)
         v->arch.hvm_vmx.exec_control |= CPU_BASED_RDTSC_EXITING;
 
     v->arch.hvm_vmx.secondary_exec_control = vmx_secondary_exec_control;
+
+    /*
+     * Disable descriptor table exiting: It's controlled by the VM event
+     * monitor requesting it.
+     */
+    v->arch.hvm_vmx.secondary_exec_control &=
+        ~SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING;
 
     /* Disable VPID for now: we decide when to enable it on VMENTER. */
     v->arch.hvm_vmx.secondary_exec_control &= ~SECONDARY_EXEC_ENABLE_VPID;
@@ -1031,20 +1072,6 @@ static int construct_vmcs(struct vcpu *v)
         /* In turn, disable posted interrupts. */
         __vmwrite(PIN_BASED_VM_EXEC_CONTROL,
                   vmx_pin_based_exec_control & ~PIN_BASED_POSTED_INTERRUPT);
-    }
-
-    if ( is_pvh_domain(d) )
-    {
-        /* Unrestricted guest (real mode for EPT) */
-        v->arch.hvm_vmx.secondary_exec_control &=
-            ~SECONDARY_EXEC_UNRESTRICTED_GUEST;
-
-        /* Start in 64-bit mode. PVH 32bitfixme. */
-        vmentry_ctl |= VM_ENTRY_IA32E_MODE;       /* GUEST_EFER.LME/LMA ignored */
-
-        ASSERT(v->arch.hvm_vmx.exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
-        ASSERT(v->arch.hvm_vmx.exec_control & CPU_BASED_ACTIVATE_MSR_BITMAP);
-        ASSERT(!(v->arch.hvm_vmx.exec_control & CPU_BASED_RDTSC_EXITING));
     }
 
     vmx_update_cpu_exec_control(v);
@@ -1182,11 +1209,7 @@ static int construct_vmcs(struct vcpu *v)
     __vmwrite(GUEST_DS_AR_BYTES, 0xc093);
     __vmwrite(GUEST_FS_AR_BYTES, 0xc093);
     __vmwrite(GUEST_GS_AR_BYTES, 0xc093);
-    if ( is_pvh_domain(d) )
-        /* CS.L == 1, exec, read/write, accessed. */
-        __vmwrite(GUEST_CS_AR_BYTES, 0xa09b);
-    else
-        __vmwrite(GUEST_CS_AR_BYTES, 0xc09b); /* exec/read, accessed */
+    __vmwrite(GUEST_CS_AR_BYTES, 0xc09b); /* exec/read, accessed */
 
     /* Guest IDT. */
     __vmwrite(GUEST_IDTR_BASE, 0);
@@ -1216,23 +1239,10 @@ static int construct_vmcs(struct vcpu *v)
               | (1U << TRAP_no_device);
     vmx_update_exception_bitmap(v);
 
-    /*
-     * In HVM domains, this happens on the realmode->paging
-     * transition.  Since PVH never goes through this transition, we
-     * need to do it at start-of-day.
-     */
-    if ( is_pvh_domain(d) )
-        vmx_update_debug_state(v);
-
     v->arch.hvm_vcpu.guest_cr[0] = X86_CR0_PE | X86_CR0_ET;
-
-    /* PVH domains always start in paging mode */
-    if ( is_pvh_domain(d) )
-        v->arch.hvm_vcpu.guest_cr[0] |= X86_CR0_PG;
-
     hvm_update_guest_cr(v, 0);
 
-    v->arch.hvm_vcpu.guest_cr[4] = is_pvh_domain(d) ? X86_CR4_PAE : 0;
+    v->arch.hvm_vcpu.guest_cr[4] = 0;
     hvm_update_guest_cr(v, 4);
 
     if ( cpu_has_vmx_tpr_shadow )
@@ -1247,8 +1257,8 @@ static int construct_vmcs(struct vcpu *v)
         struct p2m_domain *p2m = p2m_get_hostp2m(d);
         struct ept_data *ept = &p2m->ept;
 
-        ept->asr  = pagetable_get_pfn(p2m_get_pagetable(p2m));
-        __vmwrite(EPT_POINTER, ept_get_eptp(ept));
+        ept->mfn = pagetable_get_pfn(p2m_get_pagetable(p2m));
+        __vmwrite(EPT_POINTER, ept->eptp);
     }
 
     if ( paging_mode_hap(d) )
@@ -1283,19 +1293,52 @@ static int construct_vmcs(struct vcpu *v)
     return 0;
 }
 
-int vmx_read_guest_msr(u32 msr, u64 *val)
+static int vmx_msr_entry_key_cmp(const void *key, const void *elt)
+{
+    const u32 *msr = key;
+    const struct vmx_msr_entry *entry = elt;
+
+    if ( *msr > entry->index )
+        return 1;
+    if ( *msr < entry->index )
+        return -1;
+
+    return 0;
+}
+
+struct vmx_msr_entry *vmx_find_msr(u32 msr, int type)
 {
     struct vcpu *curr = current;
-    unsigned int i, msr_count = curr->arch.hvm_vmx.msr_count;
-    const struct vmx_msr_entry *msr_area = curr->arch.hvm_vmx.msr_area;
+    unsigned int msr_count;
+    struct vmx_msr_entry *msr_area;
 
-    for ( i = 0; i < msr_count; i++ )
+    if ( type == VMX_GUEST_MSR )
     {
-        if ( msr_area[i].index == msr )
-        {
-            *val = msr_area[i].data;
-            return 0;
-        }
+        msr_count = curr->arch.hvm_vmx.msr_count;
+        msr_area = curr->arch.hvm_vmx.msr_area;
+    }
+    else
+    {
+        ASSERT(type == VMX_HOST_MSR);
+        msr_count = curr->arch.hvm_vmx.host_msr_count;
+        msr_area = curr->arch.hvm_vmx.host_msr_area;
+    }
+
+    if ( msr_area == NULL )
+        return NULL;
+
+    return bsearch(&msr, msr_area, msr_count, sizeof(struct vmx_msr_entry),
+                   vmx_msr_entry_key_cmp);
+}
+
+int vmx_read_guest_msr(u32 msr, u64 *val)
+{
+    struct vmx_msr_entry *ent;
+
+    if ( (ent = vmx_find_msr(msr, VMX_GUEST_MSR)) != NULL )
+    {
+        *val = ent->data;
+        return 0;
     }
 
     return -ESRCH;
@@ -1303,17 +1346,12 @@ int vmx_read_guest_msr(u32 msr, u64 *val)
 
 int vmx_write_guest_msr(u32 msr, u64 val)
 {
-    struct vcpu *curr = current;
-    unsigned int i, msr_count = curr->arch.hvm_vmx.msr_count;
-    struct vmx_msr_entry *msr_area = curr->arch.hvm_vmx.msr_area;
+    struct vmx_msr_entry *ent;
 
-    for ( i = 0; i < msr_count; i++ )
+    if ( (ent = vmx_find_msr(msr, VMX_GUEST_MSR)) != NULL )
     {
-        if ( msr_area[i].index == msr )
-        {
-            msr_area[i].data = val;
-            return 0;
-        }
+        ent->data = val;
+        return 0;
     }
 
     return -ESRCH;
@@ -1351,14 +1389,17 @@ int vmx_add_msr(u32 msr, int type)
             __vmwrite(VM_EXIT_MSR_LOAD_ADDR, virt_to_maddr(*msr_area));
     }
 
-    for ( idx = 0; idx < *msr_count; idx++ )
+    for ( idx = 0; idx < *msr_count && (*msr_area)[idx].index <= msr; idx++ )
         if ( (*msr_area)[idx].index == msr )
             return 0;
 
     if ( *msr_count == (PAGE_SIZE / sizeof(struct vmx_msr_entry)) )
         return -ENOSPC;
 
-    msr_area_elem = *msr_area + *msr_count;
+    memmove(*msr_area + idx + 1, *msr_area + idx,
+            sizeof(*msr_area_elem) * (*msr_count - idx));
+
+    msr_area_elem = *msr_area + idx;
     msr_area_elem->index = msr;
     msr_area_elem->mbz = 0;
 
@@ -1593,7 +1634,7 @@ void vmx_domain_update_eptp(struct domain *d)
     ASSERT(atomic_read(&d->pause_count));
 
     for_each_vcpu ( d, v )
-        vmx_vcpu_update_eptp(v, ept_get_eptp(&p2m->ept));
+        vmx_vcpu_update_eptp(v, p2m->ept.eptp);
 
     ept_sync_domain(p2m);
 }
@@ -1654,10 +1695,7 @@ void vmx_do_resume(struct vcpu *v)
     bool_t debug_state;
 
     if ( v->arch.hvm_vmx.active_cpu == smp_processor_id() )
-    {
-        if ( v->arch.hvm_vmx.vmcs_pa != this_cpu(current_vmcs) )
-            vmx_load_vmcs(v);
-    }
+        vmx_vmcs_reload(v);
     else
     {
         /*
@@ -1711,7 +1749,7 @@ static inline unsigned long vmr(unsigned long field)
 {
     unsigned long val;
 
-    return __vmread_safe(field, &val) ? val : 0;
+    return vmread_safe(field, &val) ? 0 : val;
 }
 
 #define vmr16(fld) ({             \
@@ -1898,7 +1936,7 @@ static void vmcs_dump(unsigned char ch)
 
     for_each_domain ( d )
     {
-        if ( !has_hvm_container_domain(d) )
+        if ( !is_hvm_domain(d) )
             continue;
         printk("\n>>> Domain %d <<<\n", d->domain_id);
         for_each_vcpu ( d, v )

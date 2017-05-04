@@ -17,7 +17,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <asm/regs.h>
@@ -135,7 +134,7 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
             if ( p->data_is_ptr )
             {
                 switch ( hvm_copy_to_guest_phys(p->data + step * i,
-                                                &data, p->size) )
+                                                &data, p->size, current) )
                 {
                 case HVMCOPY_okay:
                     break;
@@ -210,7 +209,7 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
     return rc;
 }
 
-const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p)
+static const struct hvm_io_handler *hvm_find_io_handler(const ioreq_t *p)
 {
     struct domain *curr_d = current->domain;
     unsigned int i;

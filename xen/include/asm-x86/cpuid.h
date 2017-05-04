@@ -63,6 +63,7 @@ DECLARE_PER_CPU(bool, cpuid_faulting_enabled);
 
 #define CPUID_GUEST_NR_BASIC      (0xdu + 1)
 #define CPUID_GUEST_NR_FEAT       (0u + 1)
+#define CPUID_GUEST_NR_CACHE      (5u + 1)
 #define CPUID_GUEST_NR_XSTATE     (62u + 1)
 #define CPUID_GUEST_NR_EXTD_INTEL (0x8u + 1)
 #define CPUID_GUEST_NR_EXTD_AMD   (0x1cu + 1)
@@ -71,29 +72,6 @@ DECLARE_PER_CPU(bool, cpuid_faulting_enabled);
 
 struct cpuid_policy
 {
-    /*
-     * WARNING: During the CPUID transition period, not all information here
-     * is accurate.  The following items are accurate, and can be relied upon.
-     *
-     * Global *_policy objects:
-     *
-     * - Guest accurate:
-     *   - All of the feat, xstate and extd unions
-     *   - max_{,sub}leaf
-     *   - All FEATURESET_* words
-     *   - Short vendor infomation
-     *
-     * Per-domain objects:
-     *
-     * - Guest accurate:
-     *   - All of the feat, xstate and extd unions
-     *   - max_{,sub}leaf
-     *   - All FEATURESET_* words
-     *   - Short vendor infomation
-     *
-     * Everything else should be considered inaccurate, and not necesserily 0.
-     */
-
 #define DECL_BITFIELD(word) _DECL_BITFIELD(FEATURESET_ ## word)
 #define _DECL_BITFIELD(x)   __DECL_BITFIELD(x)
 #define __DECL_BITFIELD(x)  CPUID_BITFIELD_ ## x
@@ -106,7 +84,11 @@ struct cpuid_policy
             uint32_t max_leaf, vendor_ebx, vendor_ecx, vendor_edx;
 
             /* Leaf 0x1 - Family/model/stepping and features. */
-            uint32_t raw_fms, /* b */:32;
+            uint32_t raw_fms;
+            uint8_t :8,       /* Brand ID. */
+                clflush_size, /* Number of 8-byte blocks per cache line. */
+                lppp,         /* Logical processors per package. */
+                apic_id;      /* Initial APIC ID. */
             union {
                 uint32_t _1c;
                 struct { DECL_BITFIELD(1c); };
@@ -118,8 +100,29 @@ struct cpuid_policy
 
             /* Leaf 0x2 - TLB/Cache/Prefetch. */
             uint8_t l2_nr_queries; /* Documented as fixed to 1. */
+            uint8_t l2_desc[15];
+
+            uint64_t :64, :64; /* Leaf 0x3 - PSN. */
+            uint64_t :64, :64; /* Leaf 0x4 - Structured Cache. */
+            uint64_t :64, :64; /* Leaf 0x5 - MONITOR. */
+            uint64_t :64, :64; /* Leaf 0x6 - Therm/Perf. */
+            uint64_t :64, :64; /* Leaf 0x7 - Structured Features. */
+            uint64_t :64, :64; /* Leaf 0x8 - rsvd */
+            uint64_t :64, :64; /* Leaf 0x9 - DCA */
+
+            /* Leaf 0xa - Intel PMU. */
+            uint8_t pmu_version;
         };
     } basic;
+
+    /* Structured cache leaf: 0x00000004[xx] */
+    union {
+        struct cpuid_leaf raw[CPUID_GUEST_NR_CACHE];
+        struct cpuid_cache_leaf {
+            uint32_t type:5,
+                :27, :32, :32, :32;
+        } subleaf[CPUID_GUEST_NR_CACHE];
+    } cache;
 
     /* Structured feature leaf: 0x00000007[xx] */
     union {
@@ -216,10 +219,6 @@ struct cpuid_policy
 
     /* Value calculated from raw data above. */
     uint8_t x86_vendor;
-
-    /* Temporary: Legacy data array. */
-#define MAX_CPUID_INPUT 40
-    xen_domctl_cpuid_t legacy[MAX_CPUID_INPUT];
 };
 
 /* Fill in a featureset bitmap from a CPUID policy. */

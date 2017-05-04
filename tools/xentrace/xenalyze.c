@@ -7528,6 +7528,23 @@ void sched_process(struct pcpu_info *p)
                 printf("\n");
             }
             break;
+        case TRC_SCHED_SWITCH_INFCONT:
+            if(opt.dump_all)
+            {
+                struct {
+                    unsigned int domid, vcpuid, rsince;
+                    int slice;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s sched_switch continue d%uv%u, run for %u.%uus",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->rsince / 1000, r->rsince % 1000);
+                if ( r->slice > 0 )
+                    printf(", next slice %u.%uus", r->slice / 1000,
+                           r->slice % 1000);
+                printf("\n");
+            }
+            break;
         case TRC_SCHED_CTL:
         case TRC_SCHED_S_TIMER_FN:
         case TRC_SCHED_T_TIMER_FN:
@@ -7616,7 +7633,7 @@ void sched_process(struct pcpu_info *p)
                     unsigned int cpu:16, tasklet:8, idle:8;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched:schedule cpu %u, %s%s\n",
+                printf(" %s csched:schedule cpu %u%s%s\n",
                        ri->dump_header, r->cpu,
                        r->tasklet ? ", tasklet scheduled" : "",
                        r->idle ? ", idle" : ", busy");
@@ -7632,6 +7649,17 @@ void sched_process(struct pcpu_info *p)
                 printf(" %s csched:ratelimit, d%uv%u run only %u.%uus\n",
                        ri->dump_header, r->domid, r->vcpuid,
                        r->runtime / 1000, r->runtime % 1000);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 11): /* STEAL_CHECK   */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int peer_cpu, check;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:load_balance %s %u\n",
+                       ri->dump_header, r->check ? "checking" : "skipping",
+                       r->peer_cpu);
             }
             break;
         /* CREDIT 2 (TRC_CSCHED2_xxx) */
@@ -7825,12 +7853,13 @@ void sched_process(struct pcpu_info *p)
                 struct {
                     unsigned vcpuid:16, domid:16;
                     unsigned tickled_cpu, skipped;
+                    int credit;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:runq_candidate d%uv%u, "
+                printf(" %s csched2:runq_candidate d%uv%u, credit = %d, "
                        "%u vcpus skipped, ",
                        ri->dump_header, r->domid, r->vcpuid,
-                       r->skipped);
+                       r->credit, r->skipped);
                 if (r->tickled_cpu == (unsigned)-1)
                     printf("no cpu was tickled\n");
                 else
@@ -7862,6 +7891,16 @@ void sched_process(struct pcpu_info *p)
                 printf(" %s csched2:ratelimit, d%uv%u run only %u.%uus\n",
                        ri->dump_header, r->domid, r->vcpuid,
                        r->runtime / 1000, r->runtime % 1000);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 23): /* RUNQ_CAND_CHECK  */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int vcpuid:16, domid:16;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched2:runq_cand_check d%uv%u\n",
+                       ri->dump_header, r->domid, r->vcpuid);
             }
             break;
         /* RTDS (TRC_RTDS_xxx) */

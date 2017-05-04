@@ -257,7 +257,7 @@ static int __get_paged_frame(unsigned long gfn, unsigned long *frame, struct pag
     *frame = page_to_mfn(*page);
 #else
     *frame = mfn_x(gfn_to_mfn(rd, _gfn(gfn)));
-    *page = mfn_valid(*frame) ? mfn_to_page(*frame) : NULL;
+    *page = mfn_valid(_mfn(*frame)) ? mfn_to_page(*frame) : NULL;
     if ( (!(*page)) || (!get_page(*page, rd)) )
     {
         *frame = mfn_x(INVALID_MFN);
@@ -814,7 +814,7 @@ __gnttab_map_grant_ref(
 
     /* Bounds check on the grant ref */
     if ( unlikely(op->ref >= nr_grant_entries(rgt)))
-        PIN_FAIL(unlock_out, GNTST_bad_gntref, "Bad ref (%d).\n", op->ref);
+        PIN_FAIL(unlock_out, GNTST_bad_gntref, "Bad ref %#x\n", op->ref);
 
     act = active_entry_acquire(rgt, op->ref);
     shah = shared_entry_header(rgt, op->ref);
@@ -878,7 +878,7 @@ __gnttab_map_grant_ref(
     /* pg may be set, with a refcount included, from __get_paged_frame */
     if ( !pg )
     {
-        pg = mfn_valid(frame) ? mfn_to_page(frame) : NULL;
+        pg = mfn_valid(_mfn(frame)) ? mfn_to_page(frame) : NULL;
         if ( pg )
             owner = page_get_owner_and_reference(pg);
     }
@@ -1087,7 +1087,7 @@ __gnttab_unmap_common(
 
     if ( unlikely(op->handle >= lgt->maptrack_limit) )
     {
-        gdprintk(XENLOG_INFO, "Bad handle (%d).\n", op->handle);
+        gdprintk(XENLOG_INFO, "Bad handle %#x\n", op->handle);
         op->status = GNTST_bad_handle;
         return;
     }
@@ -1099,7 +1099,7 @@ __gnttab_unmap_common(
     if ( unlikely(!read_atomic(&op->map->flags)) )
     {
         grant_read_unlock(lgt);
-        gdprintk(XENLOG_INFO, "Zero flags for handle (%d).\n", op->handle);
+        gdprintk(XENLOG_INFO, "Zero flags for handle %#x\n", op->handle);
         op->status = GNTST_bad_handle;
         return;
     }
@@ -1132,7 +1132,7 @@ __gnttab_unmap_common(
     op->flags = read_atomic(&op->map->flags);
     if ( unlikely(!op->flags) || unlikely(op->map->domid != dom) )
     {
-        gdprintk(XENLOG_WARNING, "Unstable handle %u\n", op->handle);
+        gdprintk(XENLOG_WARNING, "Unstable handle %#x\n", op->handle);
         rc = GNTST_bad_handle;
         goto unmap_out;
     }
@@ -1259,7 +1259,7 @@ __gnttab_unmap_common_complete(struct gnttab_unmap_common *op)
 
     if ( op->flags & GNTMAP_device_map ) 
     {
-        if ( !is_iomem_page(act->frame) )
+        if ( !is_iomem_page(_mfn(act->frame)) )
         {
             if ( op->flags & GNTMAP_readonly )
                 put_page(pg);
@@ -1279,7 +1279,7 @@ __gnttab_unmap_common_complete(struct gnttab_unmap_common *op)
             goto act_release_out;
         }
 
-        if ( !is_iomem_page(op->frame) ) 
+        if ( !is_iomem_page(_mfn(op->frame)) )
         {
             if ( gnttab_host_mapping_get_page_type(op, ld, rd) )
                 put_page_type(pg);
@@ -1706,7 +1706,7 @@ gnttab_prepare_for_transfer(
     if ( unlikely(ref >= nr_grant_entries(rgt)) )
     {
         gdprintk(XENLOG_INFO,
-                "Bad grant reference (%d) for transfer to domain(%d).\n",
+                "Bad grant reference %#x for transfer to d%d\n",
                 ref, rd->domain_id);
         goto fail;
     }
@@ -1792,7 +1792,7 @@ gnttab_transfer(
 #endif
 
         /* Check the passed page frame for basic validity. */
-        if ( unlikely(!mfn_valid(mfn)) )
+        if ( unlikely(!mfn_valid(_mfn(mfn))) )
         { 
             put_gfn(d, gop.mfn);
             gdprintk(XENLOG_INFO, "gnttab_transfer: out-of-range %lx\n",
@@ -2256,7 +2256,7 @@ __acquire_grant_for_copy(
     }
     else
     {
-        ASSERT(mfn_valid(act->frame));
+        ASSERT(mfn_valid(_mfn(act->frame)));
         *page = mfn_to_page(act->frame);
         td = page_get_owner_and_reference(*page);
         /*
@@ -2672,7 +2672,7 @@ gnttab_set_version(XEN_GUEST_HANDLE_PARAM(gnttab_set_version_t) uop)
                 break;
             default:
                 gdprintk(XENLOG_INFO,
-                         "bad flags %#x in grant %u when switching version\n",
+                         "bad flags %#x in grant %#x when switching version\n",
                          flags, i);
                 /* fall through */
             case GTF_invalid:
@@ -2836,9 +2836,9 @@ __gnttab_swap_grant_ref(grant_ref_t ref_a, grant_ref_t ref_b)
 
     /* Bounds check on the grant refs */
     if ( unlikely(ref_a >= nr_grant_entries(d->grant_table)))
-        PIN_FAIL(out, GNTST_bad_gntref, "Bad ref-a (%d).\n", ref_a);
+        PIN_FAIL(out, GNTST_bad_gntref, "Bad ref-a %#x\n", ref_a);
     if ( unlikely(ref_b >= nr_grant_entries(d->grant_table)))
-        PIN_FAIL(out, GNTST_bad_gntref, "Bad ref-b (%d).\n", ref_b);
+        PIN_FAIL(out, GNTST_bad_gntref, "Bad ref-b %#x\n", ref_b);
 
     /* Swapping the same ref is a no-op. */
     if ( ref_a == ref_b )
@@ -2846,11 +2846,11 @@ __gnttab_swap_grant_ref(grant_ref_t ref_a, grant_ref_t ref_b)
 
     act_a = active_entry_acquire(gt, ref_a);
     if ( act_a->pin )
-        PIN_FAIL(out, GNTST_eagain, "ref a %ld busy\n", (long)ref_a);
+        PIN_FAIL(out, GNTST_eagain, "ref a %#x busy\n", ref_a);
 
     act_b = active_entry_acquire(gt, ref_b);
     if ( act_b->pin )
-        PIN_FAIL(out, GNTST_eagain, "ref b %ld busy\n", (long)ref_b);
+        PIN_FAIL(out, GNTST_eagain, "ref b %#x busy\n", ref_b);
 
     if ( gt->gt_version == 1 )
     {
@@ -2935,7 +2935,7 @@ static int __gnttab_cache_flush(gnttab_cache_flush_t *cflush,
     d = rcu_lock_current_domain();
     mfn = cflush->a.dev_bus_addr >> PAGE_SHIFT;
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(_mfn(mfn)) )
     {
         rcu_unlock_domain(d);
         return -EINVAL;
@@ -3284,9 +3284,8 @@ gnttab_release_mappings(
 
         ref = map->ref;
 
-        gdprintk(XENLOG_INFO, "Grant release (%hu) ref:(%hu) "
-                "flags:(%x) dom:(%hu)\n",
-                handle, ref, map->flags, map->domid);
+        gdprintk(XENLOG_INFO, "Grant release %#x ref %#x flags %#x dom %u\n",
+                 handle, ref, map->flags, map->domid);
 
         rd = rcu_lock_domain_by_id(map->domid);
         if ( rd == NULL )
@@ -3314,7 +3313,7 @@ gnttab_release_mappings(
             {
                 BUG_ON(!(act->pin & GNTPIN_devr_mask));
                 act->pin -= GNTPIN_devr_inc;
-                if ( !is_iomem_page(act->frame) )
+                if ( !is_iomem_page(_mfn(act->frame)) )
                     put_page(pg);
             }
 
@@ -3323,7 +3322,7 @@ gnttab_release_mappings(
                 BUG_ON(!(act->pin & GNTPIN_hstr_mask));
                 act->pin -= GNTPIN_hstr_inc;
                 if ( gnttab_release_host_mappings(d) &&
-                     !is_iomem_page(act->frame) )
+                     !is_iomem_page(_mfn(act->frame)) )
                     put_page(pg);
             }
         }
@@ -3333,7 +3332,7 @@ gnttab_release_mappings(
             {
                 BUG_ON(!(act->pin & GNTPIN_devw_mask));
                 act->pin -= GNTPIN_devw_inc;
-                if ( !is_iomem_page(act->frame) )
+                if ( !is_iomem_page(_mfn(act->frame)) )
                     put_page_and_type(pg);
             }
 
@@ -3342,7 +3341,7 @@ gnttab_release_mappings(
                 BUG_ON(!(act->pin & GNTPIN_hstw_mask));
                 act->pin -= GNTPIN_hstw_inc;
                 if ( gnttab_release_host_mappings(d) &&
-                     !is_iomem_page(act->frame) )
+                     !is_iomem_page(_mfn(act->frame)) )
                 {
                     if ( gnttab_host_mapping_get_page_type(map, d, rd) )
                         put_page_type(pg);
@@ -3530,8 +3529,8 @@ static void gnttab_usage_print(struct domain *rd)
             first = 0;
         }
 
-        /*      [ddd]    ddddd 0xXXXXXX 0xXXXXXXXX      ddddd 0xXXXXXX 0xXX */
-        printk("[%3d]    %5d 0x%06lx 0x%08x      %5d 0x%06"PRIx64" 0x%02x\n",
+        /*      [0xXXX]  ddddd 0xXXXXXX 0xXXXXXXXX      ddddd 0xXXXXXX 0xXX */
+        printk("[0x%03x]  %5d 0x%06lx 0x%08x      %5d 0x%06"PRIx64" 0x%02x\n",
                ref, act->domid, act->frame, act->pin,
                sha->domid, frame, status);
         active_entry_release(act);
@@ -3547,10 +3546,10 @@ static void gnttab_usage_print(struct domain *rd)
 static void gnttab_usage_print_all(unsigned char key)
 {
     struct domain *d;
-    printk("%s [ key '%c' pressed\n", __FUNCTION__, key);
+    printk("%s [ key '%c' pressed\n", __func__, key);
     for_each_domain ( d )
         gnttab_usage_print(d);
-    printk("%s ] done\n", __FUNCTION__);
+    printk("%s ] done\n", __func__);
 }
 
 static int __init gnttab_usage_init(void)

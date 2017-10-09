@@ -166,7 +166,7 @@ FORCE:
 
 .PHONY: clean
 clean:: $(addprefix _clean_, $(subdir-all))
-	rm -f *.o *~ core $(DEPS)
+	rm -f *.o *~ core $(DEPS_RM)
 _clean_%/: FORCE
 	$(MAKE) -f $(BASEDIR)/Rules.mk -C $* clean
 
@@ -204,4 +204,4 @@ $(filter %.init.o,$(obj-y) $(obj-bin-y) $(extra-y)): %.init.o: %.o Makefile
 %.s: %.S Makefile
 	$(CPP) $(AFLAGS) $< -o $@
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

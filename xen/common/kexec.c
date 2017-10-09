@@ -88,7 +88,7 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
 /*
  * Parse command lines in the format
  *
- *   crashkernel=<ramsize-range>:<size>[,...][{@,<}<address>]
+ *   crashkernel=<ramsize-range>:<size>[,...][{@,<,below=}<address>]
  *
  * with <ramsize-range> being of form
  *
@@ -97,10 +97,15 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
  * as well as the legacy ones in the format
  *
  *   crashkernel=<size>[{@,<}<address>]
+ *   crashkernel=<size>,below=address
+ *
+ * < and below are synonyomous, the latter being useful for grub2 systems
+ * which would otherwise require escaping of the < option
  */
-static void __init parse_crashkernel(const char *str)
+static int __init parse_crashkernel(const char *str)
 {
     const char *cur;
+    int rc = 0;
 
     if ( strchr(str, ':' ) )
     {
@@ -111,7 +116,8 @@ static void __init parse_crashkernel(const char *str)
             {
                 printk(XENLOG_WARNING "crashkernel: too many ranges\n");
                 cur = NULL;
-                str = strpbrk(str, "@<");
+                str = strpbrk(str, "@,<");
+                rc = -EINVAL;
                 break;
             }
 
@@ -122,6 +128,7 @@ static void __init parse_crashkernel(const char *str)
             if ( *str != '-' )
             {
                 printk(XENLOG_WARNING "crashkernel: '-' expected\n");
+                rc = -EINVAL;
                 break;
             }
 
@@ -133,6 +140,7 @@ static void __init parse_crashkernel(const char *str)
                 if ( ranges[idx].end <= ranges[idx].start )
                 {
                     printk(XENLOG_WARNING "crashkernel: end <= start\n");
+                    rc = -EINVAL;
                     break;
                 }
             }
@@ -142,6 +150,7 @@ static void __init parse_crashkernel(const char *str)
             if ( *str != ':' )
             {
                 printk(XENLOG_WARNING "crashkernel: ':' expected\n");
+                rc = -EINVAL;
                 break;
             }
 
@@ -162,11 +171,21 @@ static void __init parse_crashkernel(const char *str)
             kexec_crash_area.start = parse_size_and_unit(cur = str + 1, &str);
         else if ( *str == '<' )
             kexec_crash_area_limit = parse_size_and_unit(cur = str + 1, &str);
+        else if ( !strncmp(str, ",below=", 7) )
+            kexec_crash_area_limit = parse_size_and_unit(cur = str + 7, &str);
         else
+        {
             printk(XENLOG_WARNING "crashkernel: '%s' ignored\n", str);
+            rc = -EINVAL;
+        }
     }
     if ( cur && cur == str )
+    {
         printk(XENLOG_WARNING "crashkernel: memory value expected\n");
+        rc = -EINVAL;
+    }
+
+    return rc;
 }
 custom_param("crashkernel", parse_crashkernel);
 
@@ -180,7 +199,7 @@ custom_param("crashkernel", parse_crashkernel);
  * - all will allocate additional structures such as domain and vcpu structs
  *       low so the crash kernel can perform an extended analysis of state.
  */
-static void __init parse_low_crashinfo(const char * str)
+static int __init parse_low_crashinfo(const char *str)
 {
 
     if ( !strlen(str) )
@@ -196,7 +215,10 @@ static void __init parse_low_crashinfo(const char * str)
     {
         printk("Unknown low_crashinfo parameter '%s'.  Defaulting to min.\n", str);
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
+        return -EINVAL;
     }
+
+    return 0;
 }
 custom_param("low_crashinfo", parse_low_crashinfo);
 
@@ -206,19 +228,25 @@ custom_param("low_crashinfo", parse_low_crashinfo);
  *
  * <addr> will be rounded down to the nearest power of two.  Defaults to 64G
  */
-static void __init parse_crashinfo_maxaddr(const char * str)
+static int __init parse_crashinfo_maxaddr(const char *str)
 {
     u64 addr;
+    const char *q;
 
     /* if low_crashinfo_mode is unset, default to min. */
     if ( low_crashinfo_mode == LOW_CRASHINFO_INVALID )
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
 
-    if ( (addr = parse_size_and_unit(str, NULL)) )
+    if ( (addr = parse_size_and_unit(str, &q)) )
         crashinfo_maxaddr = addr;
     else
+    {
         printk("Unable to parse crashinfo_maxaddr. Defaulting to %"PRIpaddr"\n",
                crashinfo_maxaddr);
+        return -EINVAL;
+    }
+
+    return *q ? -EINVAL : 0;
 }
 custom_param("crashinfo_maxaddr", parse_crashinfo_maxaddr);
 

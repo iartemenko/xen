@@ -32,7 +32,17 @@
 #include <xen/sched-if.h>
 #include <xen/softirq.h>
 #include <xen/keyhandler.h>
+#include <xen/trace.h>
 
+/*
+ * null tracing events. Check include/public/trace.h for more details.
+ */
+#define TRC_SNULL_PICKED_CPU    TRC_SCHED_CLASS_EVT(SNULL, 1)
+#define TRC_SNULL_VCPU_ASSIGN   TRC_SCHED_CLASS_EVT(SNULL, 2)
+#define TRC_SNULL_VCPU_DEASSIGN TRC_SCHED_CLASS_EVT(SNULL, 3)
+#define TRC_SNULL_MIGRATE       TRC_SCHED_CLASS_EVT(SNULL, 4)
+#define TRC_SNULL_SCHEDULE      TRC_SCHED_CLASS_EVT(SNULL, 5)
+#define TRC_SNULL_TASKLET       TRC_SCHED_CLASS_EVT(SNULL, 6)
 
 /*
  * Locking:
@@ -115,9 +125,11 @@ static inline struct null_dom *null_dom(const struct domain *d)
     return d->sched_priv;
 }
 
-static inline bool vcpu_check_affinity(struct vcpu *v, unsigned int cpu)
+static inline bool vcpu_check_affinity(struct vcpu *v, unsigned int cpu,
+                                       unsigned int balance_step)
 {
-    cpumask_and(cpumask_scratch_cpu(cpu), v->cpu_hard_affinity,
+    affinity_balance_cpumask(v, balance_step, cpumask_scratch_cpu(cpu));
+    cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
                 cpupool_domain_cpumask(v->domain));
 
     return cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu));
@@ -279,31 +291,43 @@ static void null_dom_destroy(const struct scheduler *ops, struct domain *d)
  */
 static unsigned int pick_cpu(struct null_private *prv, struct vcpu *v)
 {
+    unsigned int bs;
     unsigned int cpu = v->processor, new_cpu;
     cpumask_t *cpus = cpupool_domain_cpumask(v->domain);
 
     ASSERT(spin_is_locked(per_cpu(schedule_data, cpu).schedule_lock));
 
-    cpumask_and(cpumask_scratch_cpu(cpu), v->cpu_hard_affinity, cpus);
+    for_each_affinity_balance_step( bs )
+    {
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(v, v->cpu_hard_affinity) )
+            continue;
 
-    /*
-     * If our processor is free, or we are assigned to it, and it is also
-     * still valid and part of our affinity, just go for it.
-     * (Note that we may call vcpu_check_affinity(), but we deliberately
-     * don't, so we get to keep in the scratch cpumask what we have just
-     * put in it.)
-     */
-    if ( likely((per_cpu(npc, cpu).vcpu == NULL || per_cpu(npc, cpu).vcpu == v)
-                && cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu))) )
-        return cpu;
+        affinity_balance_cpumask(v, bs, cpumask_scratch_cpu(cpu));
+        cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu), cpus);
 
-    /* If not, just go for a free pCPU, within our affinity, if any */
-    cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
-                &prv->cpus_free);
-    new_cpu = cpumask_first(cpumask_scratch_cpu(cpu));
+        /*
+         * If our processor is free, or we are assigned to it, and it is also
+         * still valid and part of our affinity, just go for it.
+         * (Note that we may call vcpu_check_affinity(), but we deliberately
+         * don't, so we get to keep in the scratch cpumask what we have just
+         * put in it.)
+         */
+        if ( likely((per_cpu(npc, cpu).vcpu == NULL || per_cpu(npc, cpu).vcpu == v)
+                    && cpumask_test_cpu(cpu, cpumask_scratch_cpu(cpu))) )
+        {
+            new_cpu = cpu;
+            goto out;
+        }
 
-    if ( likely(new_cpu != nr_cpu_ids) )
-        return new_cpu;
+        /* If not, just go for a free pCPU, within our affinity, if any */
+        cpumask_and(cpumask_scratch_cpu(cpu), cpumask_scratch_cpu(cpu),
+                    &prv->cpus_free);
+        new_cpu = cpumask_first(cpumask_scratch_cpu(cpu));
+
+        if ( likely(new_cpu != nr_cpu_ids) )
+            goto out;
+    }
 
     /*
      * If we didn't find any free pCPU, just pick any valid pcpu, even if
@@ -317,7 +341,22 @@ static unsigned int pick_cpu(struct null_private *prv, struct vcpu *v)
      * only if the pCPU is free.
      */
     cpumask_and(cpumask_scratch_cpu(cpu), cpus, v->cpu_hard_affinity);
-    return cpumask_any(cpumask_scratch_cpu(cpu));
+    new_cpu = cpumask_any(cpumask_scratch_cpu(cpu));
+
+ out:
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            uint16_t vcpu, dom;
+            uint32_t new_cpu;
+        } d;
+        d.dom = v->domain->domain_id;
+        d.vcpu = v->vcpu_id;
+        d.new_cpu = new_cpu;
+        __trace_var(TRC_SNULL_PICKED_CPU, 1, sizeof(d), &d);
+    }
+
+    return new_cpu;
 }
 
 static void vcpu_assign(struct null_private *prv, struct vcpu *v,
@@ -328,6 +367,18 @@ static void vcpu_assign(struct null_private *prv, struct vcpu *v,
     cpumask_clear_cpu(cpu, &prv->cpus_free);
 
     dprintk(XENLOG_G_INFO, "%d <-- d%dv%d\n", cpu, v->domain->domain_id, v->vcpu_id);
+
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            uint16_t vcpu, dom;
+            uint32_t cpu;
+        } d;
+        d.dom = v->domain->domain_id;
+        d.vcpu = v->vcpu_id;
+        d.cpu = cpu;
+        __trace_var(TRC_SNULL_VCPU_ASSIGN, 1, sizeof(d), &d);
+    }
 }
 
 static void vcpu_deassign(struct null_private *prv, struct vcpu *v,
@@ -337,6 +388,18 @@ static void vcpu_deassign(struct null_private *prv, struct vcpu *v,
     cpumask_set_cpu(cpu, &prv->cpus_free);
 
     dprintk(XENLOG_G_INFO, "%d <-- NULL (d%dv%d)\n", cpu, v->domain->domain_id, v->vcpu_id);
+
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            uint16_t vcpu, dom;
+            uint32_t cpu;
+        } d;
+        d.dom = v->domain->domain_id;
+        d.vcpu = v->vcpu_id;
+        d.cpu = cpu;
+        __trace_var(TRC_SNULL_VCPU_DEASSIGN, 1, sizeof(d), &d);
+    }
 }
 
 /* Change the scheduler of cpu to us (null). */
@@ -430,6 +493,7 @@ static void null_vcpu_insert(const struct scheduler *ops, struct vcpu *v)
 
 static void _vcpu_remove(struct null_private *prv, struct vcpu *v)
 {
+    unsigned int bs;
     unsigned int cpu = v->processor;
     struct null_vcpu *wvc;
 
@@ -441,19 +505,27 @@ static void _vcpu_remove(struct null_private *prv, struct vcpu *v)
 
     /*
      * If v is assigned to a pCPU, let's see if there is someone waiting,
-     * suitable to be assigned to it.
+     * suitable to be assigned to it (prioritizing vcpus that have
+     * soft-affinity with cpu).
      */
-    list_for_each_entry( wvc, &prv->waitq, waitq_elem )
+    for_each_affinity_balance_step( bs )
     {
-        if ( vcpu_check_affinity(wvc->vcpu, cpu) )
+        list_for_each_entry( wvc, &prv->waitq, waitq_elem )
         {
-            list_del_init(&wvc->waitq_elem);
-            vcpu_assign(prv, wvc->vcpu, cpu);
-            cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
-            break;
+            if ( bs == BALANCE_SOFT_AFFINITY &&
+                 !has_soft_affinity(wvc->vcpu, wvc->vcpu->cpu_hard_affinity) )
+                continue;
+
+            if ( vcpu_check_affinity(wvc->vcpu, cpu, bs) )
+            {
+                list_del_init(&wvc->waitq_elem);
+                vcpu_assign(prv, wvc->vcpu, cpu);
+                cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+                spin_unlock(&prv->waitq_lock);
+                return;
+            }
         }
     }
-
     spin_unlock(&prv->waitq_lock);
 }
 
@@ -542,6 +614,19 @@ static void null_vcpu_migrate(const struct scheduler *ops, struct vcpu *v,
     if ( v->processor == new_cpu )
         return;
 
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            uint16_t vcpu, dom;
+            uint16_t cpu, new_cpu;
+        } d;
+        d.dom = v->domain->domain_id;
+        d.vcpu = v->vcpu_id;
+        d.cpu = v->processor;
+        d.new_cpu = new_cpu;
+        __trace_var(TRC_SNULL_MIGRATE, 1, sizeof(d), &d);
+    }
+
     /*
      * v is either assigned to a pCPU, or in the waitqueue.
      *
@@ -570,7 +655,8 @@ static void null_vcpu_migrate(const struct scheduler *ops, struct vcpu *v,
      *
      * In latter, all we can do is to park v in the waitqueue.
      */
-    if ( per_cpu(npc, new_cpu).vcpu == NULL && vcpu_check_affinity(v, new_cpu) )
+    if ( per_cpu(npc, new_cpu).vcpu == NULL &&
+         vcpu_check_affinity(v, new_cpu, BALANCE_HARD_AFFINITY) )
     {
         /* v might have been in the waitqueue, so remove it */
         spin_lock(&prv->waitq_lock);
@@ -633,6 +719,7 @@ static struct task_slice null_schedule(const struct scheduler *ops,
                                        s_time_t now,
                                        bool_t tasklet_work_scheduled)
 {
+    unsigned int bs;
     const unsigned int cpu = smp_processor_id();
     struct null_private *prv = null_priv(ops);
     struct null_vcpu *wvc;
@@ -641,7 +728,33 @@ static struct task_slice null_schedule(const struct scheduler *ops,
     SCHED_STAT_CRANK(schedule);
     NULL_VCPU_CHECK(current);
 
-    ret.task = per_cpu(npc, cpu).vcpu;
+    if ( unlikely(tb_init_done) )
+    {
+        struct {
+            uint16_t tasklet, cpu;
+            int16_t vcpu, dom;
+        } d;
+        d.cpu = cpu;
+        d.tasklet = tasklet_work_scheduled;
+        if ( per_cpu(npc, cpu).vcpu == NULL )
+        {
+            d.vcpu = d.dom = -1;
+        }
+        else
+        {
+            d.vcpu = per_cpu(npc, cpu).vcpu->vcpu_id;
+            d.dom = per_cpu(npc, cpu).vcpu->domain->domain_id;
+        }
+        __trace_var(TRC_SNULL_SCHEDULE, 1, sizeof(d), &d);
+    }
+
+    if ( tasklet_work_scheduled )
+    {
+        trace_var(TRC_SNULL_TASKLET, 1, 0, NULL);
+        ret.task = idle_vcpu[cpu];
+    }
+    else
+        ret.task = per_cpu(npc, cpu).vcpu;
     ret.migrated = 0;
     ret.time = -1;
 
@@ -653,19 +766,39 @@ static struct task_slice null_schedule(const struct scheduler *ops,
     if ( unlikely(ret.task == NULL) )
     {
         spin_lock(&prv->waitq_lock);
-        wvc = list_first_entry_or_null(&prv->waitq, struct null_vcpu, waitq_elem);
-        if ( wvc && vcpu_check_affinity(wvc->vcpu, cpu) )
+
+        if ( list_empty(&prv->waitq) )
+            goto unlock;
+
+        /*
+         * We scan the waitqueue twice, for prioritizing vcpus that have
+         * soft-affinity with cpu. This may look like something expensive to
+         * do here in null_schedule(), but it's actually fine, beceuse we do
+         * it only in cases where a pcpu has no vcpu associated (e.g., as
+         * said above, the cpu has just joined a cpupool).
+         */
+        for_each_affinity_balance_step( bs )
         {
-            vcpu_assign(prv, wvc->vcpu, cpu);
-            list_del_init(&wvc->waitq_elem);
-            ret.task = wvc->vcpu;
+            list_for_each_entry( wvc, &prv->waitq, waitq_elem )
+            {
+                if ( bs == BALANCE_SOFT_AFFINITY &&
+                     !has_soft_affinity(wvc->vcpu, wvc->vcpu->cpu_hard_affinity) )
+                    continue;
+
+                if ( vcpu_check_affinity(wvc->vcpu, cpu, bs) )
+                {
+                    vcpu_assign(prv, wvc->vcpu, cpu);
+                    list_del_init(&wvc->waitq_elem);
+                    ret.task = wvc->vcpu;
+                    goto unlock;
+                }
+            }
         }
+ unlock:
         spin_unlock(&prv->waitq_lock);
     }
 
-    if ( unlikely(tasklet_work_scheduled ||
-                  ret.task == NULL ||
-                  !vcpu_runnable(ret.task)) )
+    if ( unlikely(ret.task == NULL || !vcpu_runnable(ret.task)) )
         ret.task = idle_vcpu[cpu];
 
     NULL_VCPU_CHECK(ret.task);

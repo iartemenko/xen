@@ -162,14 +162,12 @@ typedef uint64_t tsc_timestamp_t; /* RDTSC timestamp */
  * The following is all CPU context. Note that the fpu_ctxt block is filled
  * in by FXSAVE if the CPU has feature FXSR; otherwise FSAVE is used.
  *
- * Also note that when calling DOMCTL_setvcpucontext and VCPUOP_initialise
- * for HVM and PVH guests, not all information in this structure is updated:
+ * Also note that when calling DOMCTL_setvcpucontext for HVM guests, not all
+ * information in this structure is updated, the fields read include: fpu_ctxt
+ * (if VGCT_I387_VALID is set), flags, user_regs and debugreg[*].
  *
- * - For HVM guests, the structures read include: fpu_ctxt (if
- * VGCT_I387_VALID is set), flags, user_regs, debugreg[*]
- *
- * - PVH guests are the same as HVM guests, but additionally use ctrlreg[3] to
- * set cr3. All other fields not used should be set to 0.
+ * Note: VCPUOP_initialise for HVM guests is non-symetric with
+ * DOMCTL_setvcpucontext, and uses struct vcpu_hvm_context from hvm/hvm_vcpu.h
  */
 struct vcpu_guest_context {
     /* FPU registers come first so they can be aligned for FXSAVE/FXRSTOR. */

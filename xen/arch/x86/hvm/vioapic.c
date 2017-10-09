@@ -61,8 +61,8 @@ static struct hvm_vioapic *addr_vioapic(const struct domain *d,
     return NULL;
 }
 
-struct hvm_vioapic *gsi_vioapic(const struct domain *d, unsigned int gsi,
-                                unsigned int *pin)
+static struct hvm_vioapic *gsi_vioapic(const struct domain *d,
+                                       unsigned int gsi, unsigned int *pin)
 {
     unsigned int i;
 
@@ -158,6 +158,52 @@ static int vioapic_read(
     return X86EMUL_OKAY;
 }
 
+static int vioapic_hwdom_map_gsi(unsigned int gsi, unsigned int trig,
+                                 unsigned int pol)
+{
+    struct domain *currd = current->domain;
+    struct xen_domctl_bind_pt_irq pt_irq_bind = {
+        .irq_type = PT_IRQ_TYPE_PCI,
+        .machine_irq = gsi,
+    };
+    int ret, pirq = gsi;
+
+    ASSERT(is_hardware_domain(currd));
+
+    /* Interrupt has been unmasked, bind it now. */
+    ret = mp_register_gsi(gsi, trig, pol);
+    if ( ret == -EEXIST )
+        return 0;
+    if ( ret )
+    {
+        gprintk(XENLOG_WARNING, "vioapic: error registering GSI %u: %d\n",
+                 gsi, ret);
+        return ret;
+    }
+
+    ret = allocate_and_map_gsi_pirq(currd, pirq, &pirq);
+    if ( ret )
+    {
+        gprintk(XENLOG_WARNING, "vioapic: error mapping GSI %u: %d\n",
+                 gsi, ret);
+        return ret;
+    }
+
+    pcidevs_lock();
+    ret = pt_irq_create_bind(currd, &pt_irq_bind);
+    if ( ret )
+    {
+        gprintk(XENLOG_WARNING, "vioapic: error binding GSI %u: %d\n",
+                gsi, ret);
+        spin_lock(&currd->event_lock);
+        unmap_domain_pirq(currd, pirq);
+        spin_unlock(&currd->event_lock);
+    }
+    pcidevs_unlock();
+
+    return ret;
+}
+
 static void vioapic_write_redirent(
     struct hvm_vioapic *vioapic, unsigned int idx,
     int top_word, uint32_t val)
@@ -189,6 +235,20 @@ static void vioapic_write_redirent(
     }
 
     *pent = ent;
+
+    if ( is_hardware_domain(d) && unmasked )
+    {
+        int ret;
+
+        ret = vioapic_hwdom_map_gsi(gsi, ent.fields.trig_mode,
+                                    ent.fields.polarity);
+        if ( ret )
+        {
+            /* Mask the entry again. */
+            pent->fields.mask = 1;
+            unmasked = 0;
+        }
+    }
 
     if ( gsi == 0 )
     {
@@ -474,6 +534,39 @@ void vioapic_update_EOI(struct domain *d, u8 vector)
     }
 
     spin_unlock(&d->arch.hvm_domain.irq_lock);
+}
+
+int vioapic_get_mask(const struct domain *d, unsigned int gsi)
+{
+    unsigned int pin;
+    const struct hvm_vioapic *vioapic = gsi_vioapic(d, gsi, &pin);
+
+    if ( !vioapic )
+        return -EINVAL;
+
+    return vioapic->redirtbl[pin].fields.mask;
+}
+
+int vioapic_get_vector(const struct domain *d, unsigned int gsi)
+{
+    unsigned int pin;
+    const struct hvm_vioapic *vioapic = gsi_vioapic(d, gsi, &pin);
+
+    if ( !vioapic )
+        return -EINVAL;
+
+    return vioapic->redirtbl[pin].fields.vector;
+}
+
+int vioapic_get_trigger_mode(const struct domain *d, unsigned int gsi)
+{
+    unsigned int pin;
+    const struct hvm_vioapic *vioapic = gsi_vioapic(d, gsi, &pin);
+
+    if ( !vioapic )
+        return -EINVAL;
+
+    return vioapic->redirtbl[pin].fields.trig_mode;
 }
 
 static int ioapic_save(struct domain *d, hvm_domain_context_t *h)

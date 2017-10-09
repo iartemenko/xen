@@ -13,6 +13,7 @@
 #include <asm/types.h>
 #include <asm/cpufeature.h>
 #include <asm/desc.h>
+#include <asm/x86_emulate.h>
 #endif
 
 #include <asm/x86-defns.h>
@@ -168,6 +169,7 @@ extern const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id table[]);
 
 extern void identify_cpu(struct cpuinfo_x86 *);
 extern void setup_clear_cpu_cap(unsigned int);
+extern void setup_force_cpu_cap(unsigned int);
 extern void print_cpu_info(unsigned int cpu);
 extern unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c);
 
@@ -262,6 +264,12 @@ static always_inline unsigned int cpuid_count_ebx(
     cpuid_count(leaf, subleaf, &tmp, &ebx, &tmp, &tmp);
 
     return ebx;
+}
+
+static always_inline void cpuid_count_leaf(uint32_t leaf, uint32_t subleaf,
+                                           struct cpuid_leaf *data)
+{
+    cpuid_count(leaf, subleaf, &data->a, &data->b, &data->c, &data->d);
 }
 
 static inline unsigned long read_cr0(void)
@@ -396,17 +404,6 @@ static inline bool_t read_pkru_wd(uint32_t pkru, unsigned int pkey)
     outb((data), 0x23); \
 } while (0)
 
-/* Stop speculative execution */
-static inline void sync_core(void)
-{
-    int tmp;
-    asm volatile (
-        "cpuid"
-        : "=a" (tmp)
-        : "0" (1)
-        : "ebx","ecx","edx","memory" );
-}
-
 static always_inline void __monitor(const void *eax, unsigned long ecx,
                                     unsigned long edx)
 {
@@ -428,19 +425,18 @@ static always_inline void __mwait(unsigned long eax, unsigned long ecx)
 #define IOBMP_INVALID_OFFSET    0x8000
 
 struct __packed __cacheline_aligned tss_struct {
-    unsigned short	back_link,__blh;
-    union { u64 rsp0, esp0; };
-    union { u64 rsp1, esp1; };
-    union { u64 rsp2, esp2; };
-    u64 reserved1;
-    u64 ist[7]; /* Interrupt Stack Table is 1-based so tss->ist[0]
-                 * corresponds to an IST value of 1 in an Interrupt
-                 * Descriptor */
-    u64 reserved2;
-    u16 reserved3;
-    u16 bitmap;
+    uint32_t :32;
+    uint64_t rsp0, rsp1, rsp2;
+    uint64_t :64;
+    /*
+     * Interrupt Stack Table is 1-based so tss->ist[0] corresponds to an IST
+     * value of 1 in an Interrupt Descriptor.
+     */
+    uint64_t ist[7];
+    uint64_t :64;
+    uint16_t :16, bitmap;
     /* Pads the TSS to be cacheline-aligned (total size is 0x80). */
-    u8 __cacheline_filler[24];
+    uint8_t __cacheline_filler[24];
 };
 
 #define IST_NONE 0UL
@@ -471,11 +467,6 @@ extern void init_int80_direct_trap(struct vcpu *v);
 
 extern void write_ptbase(struct vcpu *v);
 
-void destroy_gdt(struct vcpu *d);
-long set_gdt(struct vcpu *d, 
-             unsigned long *frames, 
-             unsigned int entries);
-
 /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
 static always_inline void rep_nop(void)
 {
@@ -491,9 +482,6 @@ void show_execution_state(const struct cpu_user_regs *regs);
 #define dump_execution_state() run_in_exception_handler(show_execution_state)
 void show_page_walk(unsigned long addr);
 void noreturn fatal_trap(const struct cpu_user_regs *regs, bool_t show_remote);
-
-void compat_show_guest_stack(struct vcpu *v,
-                             const struct cpu_user_regs *regs, int lines);
 
 extern void mtrr_ap_init(void);
 extern void mtrr_bp_init(void);
@@ -530,6 +518,8 @@ DECLARE_TRAP_HANDLER(simd_coprocessor_error);
 DECLARE_TRAP_HANDLER_CONST(machine_check);
 DECLARE_TRAP_HANDLER(alignment_check);
 
+DECLARE_TRAP_HANDLER(entry_int82);
+
 #undef DECLARE_TRAP_HANDLER_CONST
 #undef DECLARE_TRAP_HANDLER
 
@@ -539,7 +529,6 @@ void do_reserved_trap(struct cpu_user_regs *regs);
 
 void sysenter_entry(void);
 void sysenter_eflags_saved(void);
-void compat_hypercall(void);
 void int80_direct_trap(void);
 
 #define STUBS_PER_PAGE (PAGE_SIZE / STUB_BUF_SIZE)

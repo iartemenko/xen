@@ -63,7 +63,7 @@ libxendevicemodel.so.$(MAJOR): libxendevicemodel.so.$(MAJOR).$(MINOR)
 	$(SYMLINK_SHLIB) $< $@
 
 libxendevicemodel.so.$(MAJOR).$(MINOR): $(PIC_OBJS) libxendevicemodel.map
-	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxendevicemodel.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxendevicemodel.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(PIC_OBJS) $(LDLIBS_libxentoollog) $(LDLIBS_libxencall) $(APPEND_LDFLAGS)
 
 .PHONY: install
 install: build
@@ -76,13 +76,22 @@ install: build
 	$(INSTALL_DATA) include/xendevicemodel.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xendevicemodel.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xendevicemodel.pc
+	rm -f $(DESTDIR)$(includedir)/xendevicemodel.h
+	rm -f $(DESTDIR)$(libdir)/libxendevicemodel.so
+	rm -f $(DESTDIR)$(libdir)/libxendevicemodel.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxendevicemodel.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxendevicemodel.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxendevicemodel.so.$(MAJOR).$(MINOR) libxendevicemodel.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xendevicemodel.pc

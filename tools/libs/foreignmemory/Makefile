@@ -2,7 +2,7 @@ XEN_ROOT = $(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 MAJOR    = 1
-MINOR    = 0
+MINOR    = 2
 SHLIB_LDFLAGS += -Wl,--version-script=libxenforeignmemory.map
 
 CFLAGS   += -Werror -Wmissing-prototypes
@@ -75,13 +75,22 @@ install: build
 	$(INSTALL_DATA) include/xenforeignmemory.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xenforeignmemory.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenforeignmemory.pc
+	rm -f $(DESTDIR)$(includedir)/xenforeignmemory.h
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenforeignmemory.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxenforeignmemory.so.$(MAJOR).$(MINOR) libxenforeignmemory.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xenforeignmemory.pc

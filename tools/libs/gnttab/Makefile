@@ -77,13 +77,22 @@ install: build
 	$(INSTALL_DATA) include/xengnttab.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xengnttab.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xengnttab.pc
+	rm -f $(DESTDIR)$(includedir)/xengnttab.h
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxengnttab.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxengnttab.so.$(MAJOR).$(MINOR) libxengnttab.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xengnttab.pc

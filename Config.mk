@@ -56,6 +56,11 @@ HOSTCC ?= clang
 HOSTCXX ?= clang++
 endif
 
+DEPS_INCLUDE = $(addsuffix .d2, $(basename $(wildcard $(DEPS))))
+DEPS_RM = $(DEPS) $(DEPS_INCLUDE)
+
+%.d2: %.d
+	sed "s! $$PWD/! !" $^ >$@.tmp && mv -f $@.tmp $@
 
 include $(XEN_ROOT)/config/$(XEN_OS).mk
 include $(XEN_ROOT)/config/$(XEN_TARGET_ARCH).mk
@@ -267,20 +272,20 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 5920a9d16b1ab887c2858224316a98e961d71b05
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.9.0-rc1
-MINIOS_UPSTREAM_REVISION ?= xen-4.9.0-rc1.2
-# Tue Dec 13 15:02:02 2016 +0000
-# build: prepend OBJ_DIR to linker script
+OVMF_UPSTREAM_REVISION ?= 947f3737abf65fda63f3ffd97fddfa6986986868
+QEMU_UPSTREAM_REVISION ?= master
+MINIOS_UPSTREAM_REVISION ?= d991bdbc062248221511ecb795617c36b37e1d2e
+# Wed Aug 9 13:15:48 2017 +0100
+# lib/math.c: implement __udivmoddi4
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.10.0
+SEABIOS_UPSTREAM_REVISION ?= rel-1.10.2
 # Wed Jun 22 14:53:24 2016 +0800
 # fw/msr_feature_control: add support to set MSR_IA32_FEATURE_CONTROL
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.9.0-rc1
+QEMU_TRADITIONAL_REVISION ?= 8051789e982499050680a26febeada7467e18a8d
 # Thu Mar 9 11:14:55 2017 +0000
 # cirrus/vnc: zap drop bitblit support from console code.
 

@@ -114,22 +114,18 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
     ASSERT(!(walk & PFEC_implicit) ||
            !(walk & (PFEC_insn_fetch | PFEC_user_mode)));
 
-    /*
-     * PFEC_insn_fetch is only used as an input to pagetable walking if NX or
-     * SMEP are enabled.  Otherwise, instruction fetches are indistinguishable
-     * from data reads.
-     *
-     * This property can be demonstrated on real hardware by having NX and
-     * SMEP inactive, but SMAP active, and observing that EFLAGS.AC determines
-     * whether a pagefault occures for supervisor execution on user mappings.
-     */
-    if ( !(guest_nx_enabled(v) || guest_smep_enabled(v)) )
-        walk &= ~PFEC_insn_fetch;
-
     perfc_incr(guest_walk);
     memset(gw, 0, sizeof(*gw));
     gw->va = va;
-    gw->pfec = walk & (PFEC_insn_fetch | PFEC_user_mode | PFEC_write_access);
+    gw->pfec = walk & (PFEC_user_mode | PFEC_write_access);
+
+    /*
+     * PFEC_insn_fetch is only reported if NX or SMEP are enabled.  Hardware
+     * still distingueses instruction fetches during determination of access
+     * rights.
+     */
+    if ( guest_nx_enabled(v) || guest_smep_enabled(v) )
+        gw->pfec |= (walk & PFEC_insn_fetch);
 
 #if GUEST_PAGING_LEVELS >= 3 /* PAE or 64... */
 #if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
@@ -197,12 +193,12 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
         int flags = (_PAGE_PRESENT|_PAGE_USER|_PAGE_RW|
                      _PAGE_ACCESSED|_PAGE_DIRTY);
         /*
-         * Import cache-control bits. Note that _PAGE_PAT is actually
-         * _PAGE_PSE, and it is always set. We will clear it in case
-         * _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
+         * Import protection key and cache-control bits. Note that _PAGE_PAT
+         * is actually _PAGE_PSE, and it is always set. We will clear it in
+         * case _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
          */
         flags |= (guest_l3e_get_flags(gw->l3e)
-                  & (_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
+                  & (_PAGE_PKEY_BITS|_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
         if ( !(gfn_x(start) & 1) )
             /* _PAGE_PSE_PAT not set: remove _PAGE_PAT from flags. */
             flags &= ~_PAGE_PAT;
@@ -302,12 +298,12 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
         int flags = (_PAGE_PRESENT|_PAGE_USER|_PAGE_RW|
                      _PAGE_ACCESSED|_PAGE_DIRTY);
         /*
-         * Import cache-control bits. Note that _PAGE_PAT is actually
-         * _PAGE_PSE, and it is always set. We will clear it in case
-         * _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
+         * Import protection key and cache-control bits. Note that _PAGE_PAT
+         * is actually _PAGE_PSE, and it is always set. We will clear it in
+         * case _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
          */
         flags |= (guest_l2e_get_flags(gw->l2e)
-                  & (_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
+                  & (_PAGE_PKEY_BITS|_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
         if ( !(gfn_x(start) & 1) )
             /* _PAGE_PSE_PAT not set: remove _PAGE_PAT from flags. */
             flags &= ~_PAGE_PAT;
@@ -360,10 +356,42 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
     gw->pfec |= PFEC_page_present;
 
     /*
-     * The pagetable walk has returned a successful translation.  Now check
-     * access rights to see whether the access should succeed.
+     * The pagetable walk has returned a successful translation (i.e. All PTEs
+     * are present and have no reserved bits set).  Now check access rights to
+     * see whether the access should succeed.
      */
     ar = (ar_and & AR_ACCUM_AND) | (ar_or & AR_ACCUM_OR);
+
+    /*
+     * Sanity check.  If EFER.NX is disabled, _PAGE_NX_BIT is reserved and
+     * should have caused a translation failure before we get here.
+     */
+    if ( ar & _PAGE_NX_BIT )
+        ASSERT(guest_nx_enabled(v));
+
+#if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
+    /*
+     * If all access checks are thus far ok, check Protection Key for 64bit
+     * data accesses to user mappings.
+     *
+     * N.B. In the case that the walk ended with a superpage, the fabricated
+     * gw->l1e contains the appropriate leaf pkey.
+     */
+    if ( (ar & _PAGE_USER) && !(walk & PFEC_insn_fetch) &&
+         guest_pku_enabled(v) )
+    {
+        unsigned int pkey = guest_l1e_get_pkey(gw->l1e);
+        unsigned int pkru = read_pkru();
+
+        if ( read_pkru_ad(pkru, pkey) ||
+             ((walk & PFEC_write_access) && read_pkru_wd(pkru, pkey) &&
+              ((walk & PFEC_user_mode) || guest_wp_enabled(v))) )
+        {
+            gw->pfec |= PFEC_prot_key;
+            goto out;
+        }
+    }
+#endif
 
     if ( (walk & PFEC_insn_fetch) && (ar & _PAGE_NX_BIT) )
         /* Requested an instruction fetch and found NX? Fail. */
@@ -399,29 +427,6 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
             /* Requested a write, got a read, and CR0.WP is set? Fail. */
             goto out;
     }
-
-#if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
-    /*
-     * If all access checks are thusfar ok, check Protection Key for 64bit
-     * user data accesses.
-     *
-     * N.B. In the case that the walk ended with a superpage, the fabricated
-     * gw->l1e contains the appropriate leaf pkey.
-     */
-    if ( (walk & PFEC_user_mode) && !(walk & PFEC_insn_fetch) &&
-         guest_pku_enabled(v) )
-    {
-        unsigned int pkey = guest_l1e_get_pkey(gw->l1e);
-        unsigned int pkru = read_pkru();
-
-        if ( read_pkru_ad(pkru, pkey) ||
-             ((ar & PFEC_write_access) && read_pkru_wd(pkru, pkey)) )
-        {
-            gw->pfec |= PFEC_prot_key;
-            goto out;
-        }
-    }
-#endif
 
     walk_ok = true;
 

@@ -12,6 +12,8 @@ PERFCOUNTER(calls_from_multicall,       "calls from multicall")
 PERFCOUNTER(irqs,                   "#interrupts")
 PERFCOUNTER(ipis,                   "#IPIs")
 
+PERFCOUNTER(rcu_idle_timer,         "RCU: idle_timer")
+
 /* Generic scheduler counters (applicable to all schedulers) */
 PERFCOUNTER(sched_irq,              "sched: timer")
 PERFCOUNTER(sched_run,              "sched: runs through scheduler")
@@ -66,6 +68,8 @@ PERFCOUNTER(migrate_on_runq,        "csched2: migrate_on_runq")
 PERFCOUNTER(migrate_no_runq,        "csched2: migrate_no_runq")
 PERFCOUNTER(runtime_min_timer,      "csched2: runtime_min_timer")
 PERFCOUNTER(runtime_max_timer,      "csched2: runtime_max_timer")
+PERFCOUNTER(pick_cpu,               "csched2: pick_cpu")
+PERFCOUNTER(need_fallback_cpu,      "csched2: need_fallback_cpu")
 PERFCOUNTER(migrated,               "csched2: migrated")
 PERFCOUNTER(migrate_resisted,       "csched2: migrate_resisted")
 PERFCOUNTER(credit_reset,           "csched2: credit_reset")

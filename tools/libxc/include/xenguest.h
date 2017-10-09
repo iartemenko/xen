@@ -39,6 +39,20 @@
  */
 struct xenevtchn_handle;
 
+/* For save's precopy_policy(). */
+struct precopy_stats
+{
+    unsigned int iteration;
+    unsigned int total_written;
+    long dirty_count; /* -1 if unknown */
+};
+
+/*
+ * A precopy_policy callback may not be running in the same address
+ * space as libxc an so precopy_stats is passed by value.
+ */
+typedef int (*precopy_policy_t)(struct precopy_stats, void *);
+
 /* callbacks provided by xc_domain_save */
 struct save_callbacks {
     /* Called after expiration of checkpoint interval,
@@ -46,7 +60,22 @@ struct save_callbacks {
      */
     int (*suspend)(void* data);
 
-    /* Called after the guest's dirty pages have been
+    /*
+     * Called before and after every batch of page data sent during
+     * the precopy phase of a live migration to ask the caller what
+     * to do next based on the current state of the precopy migration.
+     *
+     * Should return one of the values listed below:
+     */
+#define XGS_POLICY_ABORT          (-1) /* Abandon the migration entirely
+                                        * and tidy up. */
+#define XGS_POLICY_CONTINUE_PRECOPY 0  /* Remain in the precopy phase. */
+#define XGS_POLICY_STOP_AND_COPY    1  /* Immediately suspend and transmit the
+                                        * remaining dirty pages. */
+    precopy_policy_t precopy_policy;
+
+    /*
+     * Called after the guest's dirty pages have been
      *  copied into an output buffer.
      * Callback function resumes the guest & the device model,
      *  returns to xc_domain_save.
@@ -55,7 +84,8 @@ struct save_callbacks {
      */
     int (*postcopy)(void* data);
 
-    /* Called after the memory checkpoint has been flushed
+    /*
+     * Called after the memory checkpoint has been flushed
      * out into the network. Typical actions performed in this
      * callback include:
      *   (a) send the saved device model state (for HVM guests),
@@ -65,7 +95,8 @@ struct save_callbacks {
      *
      * returns:
      * 0: terminate checkpointing gracefully
-     * 1: take another checkpoint */
+     * 1: take another checkpoint
+     */
     int (*checkpoint)(void* data);
 
     /*
@@ -100,8 +131,8 @@ typedef enum {
  *        doesn't use checkpointing
  * @return 0 on success, -1 on failure
  */
-int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom, uint32_t max_iters,
-                   uint32_t max_factor, uint32_t flags /* XCFLAGS_xxx */,
+int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom,
+                   uint32_t flags /* XCFLAGS_xxx */,
                    struct save_callbacks* callbacks, int hvm,
                    xc_migration_stream_t stream_type, int recv_fd);
 
@@ -157,7 +188,6 @@ struct restore_callbacks {
  * @parm store_mfn returned with the mfn of the store page
  * @parm hvm non-zero if this is a HVM restore
  * @parm pae non-zero if this HVM domain has PAE support enabled
- * @parm superpages non-zero to allocate guest memory with superpages
  * @parm stream_type non-zero if the far end of the stream is using checkpointing
  * @parm callbacks non-NULL to receive a callback to restore toolstack
  *       specific data
@@ -167,7 +197,7 @@ int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
                       unsigned int store_evtchn, unsigned long *store_mfn,
                       domid_t store_domid, unsigned int console_evtchn,
                       unsigned long *console_mfn, domid_t console_domid,
-                      unsigned int hvm, unsigned int pae, int superpages,
+                      unsigned int hvm, unsigned int pae,
                       xc_migration_stream_t stream_type,
                       struct restore_callbacks *callbacks, int send_back_fd);
 

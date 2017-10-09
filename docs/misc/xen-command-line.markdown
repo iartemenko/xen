@@ -133,13 +133,6 @@ resume.
 `s3_mode` instructs Xen to set up the boot time (option `vga=`) video
 mode during S3 resume.
 
-### allowsuperpage
-> `= <boolean>`
-
-> Default: `true`
-
-Permit Xen to use superpages when performing memory management.
-
 ### altp2m (Intel)
 > `= <boolean>`
 
@@ -324,6 +317,46 @@ Both option `com1` and `com2` follow the same format.
 
 A typical setup for most situations might be `com1=115200,8n1`
 
+In addition to the above positional specification for UART parameters,
+name=value pair specfications are also supported. This is used to add
+flexibility for UART devices which require additional UART parameter
+configurations.
+
+The comma separation still delineates positional parameters. Hence,
+unless the parameter is explicitly specified with name=value option, it
+will be considered a positional parameter.
+
+The syntax consists of
+com1=(comma-separated positional parameters),(comma separated name-value pairs)
+
+The accepted name keywords for name=value pairs are:
+
+* `baud` - accepts integer baud rate (eg. 115200) or `auto`
+* `bridge`- Similar to bridge-bdf in positional parameters.
+            Used to determine the PCI bridge to access the UART device.
+            Notation is xx:xx.x `<bus>:<device>.<function>`
+* `clock-hz`- accepts large integers to setup UART clock frequencies.
+              Do note - these values are multiplied by 16.
+* `data-bits` - integer between 5 and 8
+* `dev` - accepted values are `pci` OR `amt`. If this option
+          is used to specify if the serial device is pci-based. The io_base
+          cannot be specified when `dev=pci` or `dev=amt` is used.
+* `io-base` - accepts integer which specified IO base port for UART registers
+* `irq` - IRQ number to use
+* `parity` - accepted values are same as positional parameters
+* `port` - Used to specify which port the PCI serial device is located on
+           Notation is xx:xx.x `<bus>:<device>.<function>`
+* `reg-shift` - register shifts required to set UART registers
+* `reg-width` - register width required to set UART registers
+                (only accepts 1 and 4)
+* `stop-bits` - only accepts 1 or 2 for the number of stop bits
+
+The following are examples of correct specifications:
+
+    com1=115200,8n1,0x3f8,4
+    com1=115200,8n1,0x3f8,4,reg_width=4,reg_shift=2
+    com1=baud=115200,parity=n,stop_bits=1,io_base=0x3f8,reg_width=4
+
 ### conring\_size
 > `= <size>`
 
@@ -358,6 +391,8 @@ makes sense on its own.
 
 > Default: `none`
 
+> Can be modified at runtime
+
 Specify which timestamp format Xen should use for each console line.
 
 * `none`: No timestamps
@@ -383,6 +418,8 @@ into the console ring buffer.
 > `= <switch char>[x]`
 
 > Default: `conswitch=a`
+
+> Can be modified at runtime
 
 Specify which character should be used to switch serial input between
 Xen and dom0.  The required sequence is CTRL-&lt;switch char&gt; three
@@ -474,6 +511,7 @@ combination with the `low_crashinfo` command line option.
 ### crashkernel
 > `= <ramsize-range>:<size>[,...][{@,<}<offset>]`
 > `= <size>[{@,<}<offset>]`
+> `= <size>,below=offset`
 
 Specify sizes and optionally placement of the crash kernel reservation
 area.  The `<ramsize-range>:<size>` pairs indicate how much memory to
@@ -484,6 +522,10 @@ RAM (`<ramsize-range>`).  Each `<ramsize-range>` is of the form
 A trailing `@<offset>` specifies the exact address this area should be
 placed at, whereas `<` in place of `@` just specifies an upper bound of
 the address range the area should fall into.
+
+< and below are synonyomous, the latter being useful for grub2 systems
+which would otherwise require escaping of the < option
+
 
 ### credit2\_balance\_over
 > `= <integer>`
@@ -525,7 +567,7 @@ also slow in responding to load changes.
 The default value of `1 sec` is rather long.
 
 ### credit2\_runqueue
-> `= core | socket | node | all`
+> `= cpu | core | socket | node | all`
 
 > Default: `socket`
 
@@ -536,6 +578,7 @@ balancing (for instance, it will deal better with hyperthreading),
 but also more overhead.
 
 Available alternatives, with their meaning, are:
+* `cpu`: one runqueue per each logical pCPUs of the host;
 * `core`: one runqueue per each physical core of the host;
 * `socket`: one runqueue per each physical socket (which often,
             but not always, matches a NUMA node) of the host;
@@ -859,6 +902,8 @@ maximum number of maptrack frames domain.
 
 > Default: `guest_loglvl=none/warning`
 
+> Can be modified at runtime
+
 Set the logging level for Xen guests.  Any log message with equal more
 more importance will be printed.
 
@@ -1124,6 +1169,8 @@ if left disabled by the BIOS.
 > `= <level>[/<rate-limited level>]` where level is `none | error | warning | info | debug | all`
 
 > Default: `loglvl=warning`
+
+> Can be modified at runtime
 
 Set the logging level for Xen.  Any log message with equal more more
 importance will be printed.

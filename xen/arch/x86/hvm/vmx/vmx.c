@@ -55,6 +55,7 @@
 #include <asm/hvm/nestedhvm.h>
 #include <asm/altp2m.h>
 #include <asm/event.h>
+#include <asm/mce.h>
 #include <asm/monitor.h>
 #include <public/arch-x86/cpuid.h>
 
@@ -1068,24 +1069,20 @@ static unsigned int _vmx_get_cpl(struct vcpu *v)
     return cpl;
 }
 
-/* SDM volume 3b section 22.3.1.2: we can only enter virtual 8086 mode
- * if all of CS, SS, DS, ES, FS and GS are 16bit ring-3 data segments.
- * The guest thinks it's got ring-0 segments, so we need to fudge
- * things.  We store the ring-3 version in the VMCS to avoid lots of
- * shuffling on vmenter and vmexit, and translate in these accessors. */
-
-#define rm_cs_attr (((union segment_attributes) {                       \
-        .fields = { .type = 0xb, .s = 1, .dpl = 0, .p = 1, .avl = 0,    \
-                    .l = 0, .db = 0, .g = 0, .pad = 0 } }).bytes)
-#define rm_ds_attr (((union segment_attributes) {                       \
-        .fields = { .type = 0x3, .s = 1, .dpl = 0, .p = 1, .avl = 0,    \
-                    .l = 0, .db = 0, .g = 0, .pad = 0 } }).bytes)
-#define vm86_ds_attr (((union segment_attributes) {                     \
-        .fields = { .type = 0x3, .s = 1, .dpl = 3, .p = 1, .avl = 0,    \
-                    .l = 0, .db = 0, .g = 0, .pad = 0 } }).bytes)
-#define vm86_tr_attr (((union segment_attributes) {                     \
-        .fields = { .type = 0xb, .s = 0, .dpl = 0, .p = 1, .avl = 0,    \
-                    .l = 0, .db = 0, .g = 0, .pad = 0 } }).bytes)
+/*
+ * SDM Vol 3: VM Entries > Checks on Guest Segment Registers:
+ *
+ * We can only enter virtual 8086 mode if all of CS, SS, DS, ES, FS and GS are
+ * 16bit ring-3 data segments.  On hardware lacking the unrestricted_guest
+ * feature, Xen fakes up real mode using vm86 mode.  The guest thinks it's got
+ * ring-0 segments, so we need to fudge things.  We store the ring-3 version
+ * in the VMCS to avoid lots of shuffling on vmenter and vmexit, and translate
+ * in these accessors.
+ */
+#define rm_cs_attr   0x9b
+#define rm_ds_attr   0x93
+#define vm86_ds_attr 0xf3
+#define vm86_tr_attr 0x8b
 
 static void vmx_get_segment_register(struct vcpu *v, enum x86_segment seg,
                                      struct segment_register *reg)
@@ -1156,7 +1153,7 @@ static void vmx_get_segment_register(struct vcpu *v, enum x86_segment seg,
      * Fold VT-x representation into Xen's representation.  The Present bit is
      * unconditionally set to the inverse of unusable.
      */
-    reg->attr.bytes =
+    reg->attr =
         (!(attr & (1u << 16)) << 7) | (attr & 0x7f) | ((attr >> 4) & 0xf00);
 
     /* Adjust for virtual 8086 mode */
@@ -1175,7 +1172,7 @@ static void vmx_get_segment_register(struct vcpu *v, enum x86_segment seg,
              * but for SS we assume it has: the Ubuntu graphical bootloader
              * does this and gets badly confused if we leave the old SS in 
              * place. */
-            reg->attr.bytes = (seg == x86_seg_cs ? rm_cs_attr : rm_ds_attr);
+            reg->attr = (seg == x86_seg_cs ? rm_cs_attr : rm_ds_attr);
             *sreg = *reg;
         }
         else 
@@ -1195,7 +1192,7 @@ static void vmx_set_segment_register(struct vcpu *v, enum x86_segment seg,
     uint64_t base;
 
     sel = reg->sel;
-    attr = reg->attr.bytes;
+    attr = reg->attr;
     limit = reg->limit;
     base = reg->base;
 
@@ -1233,8 +1230,7 @@ static void vmx_set_segment_register(struct vcpu *v, enum x86_segment seg,
              * cause confusion for the guest if it reads the selector,
              * but otherwise we have to emulate if *any* segment hasn't
              * been reloaded. */
-            if ( base < 0x100000 && !(base & 0xf) && limit >= 0xffff
-                 && reg->attr.fields.p )
+            if ( base < 0x100000 && !(base & 0xf) && limit >= 0xffff && reg->p )
             {
                 sel = base >> 4;
                 attr = vm86_ds_attr;
@@ -1373,8 +1369,7 @@ static void vmx_handle_cd(struct vcpu *v, unsigned long value)
 
             vmx_get_guest_pat(v, pat);
             vmx_set_guest_pat(v, uc_pat);
-            vmx_enable_intercept_for_msr(v, MSR_IA32_CR_PAT,
-                                         MSR_TYPE_R | MSR_TYPE_W);
+            vmx_set_msr_intercept(v, MSR_IA32_CR_PAT, VMX_MSR_RW);
 
             wbinvd();               /* flush possibly polluted cache */
             hvm_asid_flush_vcpu(v); /* invalidate memory type cached in TLB */
@@ -1385,8 +1380,7 @@ static void vmx_handle_cd(struct vcpu *v, unsigned long value)
             v->arch.hvm_vcpu.cache_mode = NORMAL_CACHE_MODE;
             vmx_set_guest_pat(v, *pat);
             if ( !iommu_enabled || iommu_snoop )
-                vmx_disable_intercept_for_msr(v, MSR_IA32_CR_PAT,
-                                              MSR_TYPE_R | MSR_TYPE_W);
+                vmx_clear_msr_intercept(v, MSR_IA32_CR_PAT, VMX_MSR_RW);
             hvm_asid_flush_vcpu(v); /* no need to flush cache */
         }
     }
@@ -1673,13 +1667,12 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
         if ( !hvm_paging_enabled(v) )
         {
             /*
-             * SMEP/SMAP/PKU is disabled if CPU is in non-paging mode in
-             * hardware. However Xen always uses paging mode to emulate guest
-             * non-paging mode. To emulate this behavior, SMEP/SMAP/PKU needs
-             * to be manually disabled when guest VCPU is in non-paging mode.
+             * SMEP/SMAP is disabled if CPU is in non-paging mode in hardware.
+             * However Xen always uses paging mode to emulate guest non-paging
+             * mode. To emulate this behavior, SMEP/SMAP needs to be manually
+             * disabled when guest VCPU is in non-paging mode.
              */
-            v->arch.hvm_vcpu.hw_cr[4] &=
-                ~(X86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_PKE);
+            v->arch.hvm_vcpu.hw_cr[4] &= ~(X86_CR4_SMEP | X86_CR4_SMAP);
         }
         __vmwrite(GUEST_CR4, v->arch.hvm_vcpu.hw_cr[4]);
         break;
@@ -2127,7 +2120,7 @@ static void vmx_enable_msr_interception(struct domain *d, uint32_t msr)
     struct vcpu *v;
 
     for_each_vcpu ( d, v )
-        vmx_enable_intercept_for_msr(v, msr, MSR_TYPE_W);
+        vmx_set_msr_intercept(v, msr, VMX_MSR_W);
 }
 
 static bool_t vmx_is_singlestep_supported(void)
@@ -2434,12 +2427,13 @@ static void pi_notification_interrupt(struct cpu_user_regs *regs)
 }
 
 static void __init lbr_tsx_fixup_check(void);
+static void __init bdw_erratum_bdf14_fixup_check(void);
 
 const struct hvm_function_table * __init start_vmx(void)
 {
     set_in_cr4(X86_CR4_VMXE);
 
-    if ( vmx_cpu_up() )
+    if ( _vmx_cpu_up(true) )
     {
         printk("VMX: failed to initialise.\n");
         return NULL;
@@ -2499,6 +2493,7 @@ const struct hvm_function_table * __init start_vmx(void)
     setup_vmcs_dump();
 
     lbr_tsx_fixup_check();
+    bdw_erratum_bdf14_fixup_check();
 
     return &vmx_function_table;
 }
@@ -2728,39 +2723,49 @@ static const struct lbr_info *last_branch_msr_get(void)
         switch ( boot_cpu_data.x86_model )
         {
         /* Core2 Duo */
-        case 15:
+        case 0x0f:
         /* Enhanced Core */
-        case 23:
+        case 0x17:
+        /* Xeon 7400 */
+        case 0x1d:
             return c2_lbr;
         /* Nehalem */
-        case 26: case 30: case 31: case 46:
+        case 0x1a: case 0x1e: case 0x1f: case 0x2e:
         /* Westmere */
-        case 37: case 44: case 47:
+        case 0x25: case 0x2c: case 0x2f:
         /* Sandy Bridge */
-        case 42: case 45:
+        case 0x2a: case 0x2d:
         /* Ivy Bridge */
-        case 58: case 62:
+        case 0x3a: case 0x3e:
         /* Haswell */
-        case 60: case 63: case 69: case 70:
+        case 0x3c: case 0x3f: case 0x45: case 0x46:
         /* Broadwell */
-        case 61: case 71: case 79: case 86:
+        case 0x3d: case 0x47: case 0x4f: case 0x56:
             return nh_lbr;
         /* Skylake */
-        case 78: case 94:
-        /* future */
-        case 142: case 158:
+        case 0x4e: case 0x5e:
+        /* Xeon Scalable */
+        case 0x55:
+        /* Cannon Lake */
+        case 0x66:
+        /* Goldmont Plus */
+        case 0x7a:
+        /* Kaby Lake */
+        case 0x8e: case 0x9e:
             return sk_lbr;
         /* Atom */
-        case 28: case 38: case 39: case 53: case 54:
+        case 0x1c: case 0x26: case 0x27: case 0x35: case 0x36:
         /* Silvermont */
-        case 55: case 74: case 77: case 90: case 93:
-        /* next gen Xeon Phi */
-        case 87:
+        case 0x37: case 0x4a: case 0x4d: case 0x5a: case 0x5d:
+        /* Xeon Phi Knights Landing */
+        case 0x57:
+        /* Xeon Phi Knights Mill */
+        case 0x85:
         /* Airmont */
-        case 76:
+        case 0x4c:
             return at_lbr;
         /* Goldmont */
-        case 92: case 95:
+        case 0x5c: case 0x5f:
             return gm_lbr;
         }
         break;
@@ -2787,11 +2792,16 @@ enum
     LBR_FORMAT_EIP_FLAGS_TSX      = 0x4, /* 64-bit EIP, Flags, TSX */
     LBR_FORMAT_EIP_FLAGS_TSX_INFO = 0x5, /* 64-bit EIP, Flags, TSX, LBR_INFO */
     LBR_FORMAT_EIP_FLAGS_CYCLES   = 0x6, /* 64-bit EIP, Flags, Cycles */
+    LBR_FORMAT_LIP_FLAGS_TSX_INFO = 0x7, /* 64-bit LIP, Flags, TSX, LBR_INFO */
 };
 
 #define LBR_FROM_SIGNEXT_2MSB  ((1ULL << 59) | (1ULL << 60))
 
+#define FIXUP_LBR_TSX            (1u << 0)
+#define FIXUP_BDW_ERRATUM_BDF14  (1u << 1)
+
 static bool __read_mostly lbr_tsx_fixup_needed;
+static bool __read_mostly bdw_erratum_bdf14_fixup_needed;
 static uint32_t __read_mostly lbr_from_start;
 static uint32_t __read_mostly lbr_from_end;
 static uint32_t __read_mostly lbr_lastint_from;
@@ -2828,6 +2838,13 @@ static void __init lbr_tsx_fixup_check(void)
     }
 }
 
+static void __init bdw_erratum_bdf14_fixup_check(void)
+{
+    /* Broadwell E5-2600 v4 processors need to work around erratum BDF14. */
+    if ( boot_cpu_data.x86 == 6 && boot_cpu_data.x86_model == 79 )
+        bdw_erratum_bdf14_fixup_needed = true;
+}
+
 static int is_last_branch_msr(u32 ecx)
 {
     const struct lbr_info *lbr = last_branch_msr_get();
@@ -2844,6 +2861,8 @@ static int is_last_branch_msr(u32 ecx)
 
 static int vmx_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
 {
+    const struct vcpu *curr = current;
+
     HVM_DBG_LOG(DBG_LEVEL_MSR, "ecx=%#x", msr);
 
     switch ( msr )
@@ -2861,6 +2880,12 @@ static int vmx_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
         __vmread(GUEST_IA32_DEBUGCTL, msr_content);
         break;
     case MSR_IA32_FEATURE_CONTROL:
+        *msr_content = IA32_FEATURE_CONTROL_LOCK;
+        if ( vmce_has_lmce(curr) )
+            *msr_content |= IA32_FEATURE_CONTROL_LMCE_ON;
+        if ( nestedhvm_enabled(curr->domain) )
+            *msr_content |= IA32_FEATURE_CONTROL_ENABLE_VMXON_OUTSIDE_SMX;
+        break;
     case MSR_IA32_VMX_BASIC...MSR_IA32_VMX_VMFUNC:
         if ( !nvmx_msr_read_intercept(msr, msr_content) )
             goto gp_fault;
@@ -2880,16 +2905,6 @@ static int vmx_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
     case MSR_IA32_DS_AREA:
         if ( vpmu_do_rdmsr(msr, msr_content) )
             goto gp_fault;
-        break;
-
-    case MSR_INTEL_PLATFORM_INFO:
-        *msr_content = MSR_PLATFORM_INFO_CPUID_FAULTING;
-        break;
-
-    case MSR_INTEL_MISC_FEATURES_ENABLES:
-        *msr_content = 0;
-        if ( current->arch.cpuid_faulting )
-            *msr_content |= MSR_MISC_FEATURES_CPUID_FAULTING;
         break;
 
     default:
@@ -3010,23 +3025,17 @@ void vmx_vlapic_msr_changed(struct vcpu *v)
             {
                 for ( msr = MSR_IA32_APICBASE_MSR;
                       msr <= MSR_IA32_APICBASE_MSR + 0xff; msr++ )
-                    vmx_disable_intercept_for_msr(v, msr, MSR_TYPE_R);
+                    vmx_clear_msr_intercept(v, msr, VMX_MSR_R);
 
-                vmx_enable_intercept_for_msr(v, MSR_IA32_APICPPR_MSR,
-                                             MSR_TYPE_R);
-                vmx_enable_intercept_for_msr(v, MSR_IA32_APICTMICT_MSR,
-                                             MSR_TYPE_R);
-                vmx_enable_intercept_for_msr(v, MSR_IA32_APICTMCCT_MSR,
-                                             MSR_TYPE_R);
+                vmx_set_msr_intercept(v, MSR_IA32_APICPPR_MSR, VMX_MSR_R);
+                vmx_set_msr_intercept(v, MSR_IA32_APICTMICT_MSR, VMX_MSR_R);
+                vmx_set_msr_intercept(v, MSR_IA32_APICTMCCT_MSR, VMX_MSR_R);
             }
             if ( cpu_has_vmx_virtual_intr_delivery )
             {
-                vmx_disable_intercept_for_msr(v, MSR_IA32_APICTPR_MSR,
-                                              MSR_TYPE_W);
-                vmx_disable_intercept_for_msr(v, MSR_IA32_APICEOI_MSR,
-                                              MSR_TYPE_W);
-                vmx_disable_intercept_for_msr(v, MSR_IA32_APICSELF_MSR,
-                                              MSR_TYPE_W);
+                vmx_clear_msr_intercept(v, MSR_IA32_APICTPR_MSR, VMX_MSR_W);
+                vmx_clear_msr_intercept(v, MSR_IA32_APICEOI_MSR, VMX_MSR_W);
+                vmx_clear_msr_intercept(v, MSR_IA32_APICSELF_MSR, VMX_MSR_W);
             }
         }
         else
@@ -3037,7 +3046,7 @@ void vmx_vlapic_msr_changed(struct vcpu *v)
            SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE) )
         for ( msr = MSR_IA32_APICBASE_MSR;
               msr <= MSR_IA32_APICBASE_MSR + 0xff; msr++ )
-            vmx_enable_intercept_for_msr(v, msr, MSR_TYPE_R | MSR_TYPE_W);
+            vmx_set_msr_intercept(v, msr, VMX_MSR_RW);
 
     vmx_update_secondary_exec_control(v);
     vmx_vmcs_exit(v);
@@ -3086,9 +3095,12 @@ static int vmx_msr_write_intercept(unsigned int msr, uint64_t msr_content)
                 for ( i = 0; (rc == 0) && (i < lbr->count); i++ )
                     if ( (rc = vmx_add_guest_msr(lbr->base + i)) == 0 )
                     {
-                        vmx_disable_intercept_for_msr(v, lbr->base + i, MSR_TYPE_R | MSR_TYPE_W);
-                        v->arch.hvm_vmx.lbr_tsx_fixup_enabled =
-                            lbr_tsx_fixup_needed;
+                        vmx_clear_msr_intercept(v, lbr->base + i, VMX_MSR_RW);
+                        if ( lbr_tsx_fixup_needed )
+                            v->arch.hvm_vmx.lbr_fixup_enabled |= FIXUP_LBR_TSX;
+                        if ( bdw_erratum_bdf14_fixup_needed )
+                            v->arch.hvm_vmx.lbr_fixup_enabled |=
+                                FIXUP_BDW_ERRATUM_BDF14;
                     }
         }
 
@@ -3101,10 +3113,10 @@ static int vmx_msr_write_intercept(unsigned int msr, uint64_t msr_content)
         break;
     }
     case MSR_IA32_FEATURE_CONTROL:
-    case MSR_IA32_VMX_BASIC...MSR_IA32_VMX_TRUE_ENTRY_CTLS:
-        if ( !nvmx_msr_write_intercept(msr, msr_content) )
-            goto gp_fault;
-        break;
+    case MSR_IA32_VMX_BASIC ... MSR_IA32_VMX_VMFUNC:
+        /* None of these MSRs are writeable. */
+        goto gp_fault;
+
     case MSR_P6_PERFCTR(0)...MSR_P6_PERFCTR(7):
     case MSR_P6_EVNTSEL(0)...MSR_P6_EVNTSEL(7):
     case MSR_CORE_PERF_FIXED_CTR0...MSR_CORE_PERF_FIXED_CTR2:
@@ -3114,27 +3126,6 @@ static int vmx_msr_write_intercept(unsigned int msr, uint64_t msr_content)
          if ( vpmu_do_wrmsr(msr, msr_content, 0) )
             goto gp_fault;
         break;
-
-    case MSR_INTEL_PLATFORM_INFO:
-        if ( msr_content ||
-             rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msr_content) )
-            goto gp_fault;
-        break;
-
-    case MSR_INTEL_MISC_FEATURES_ENABLES:
-    {
-        bool old_cpuid_faulting = v->arch.cpuid_faulting;
-
-        if ( msr_content & ~MSR_MISC_FEATURES_CPUID_FAULTING )
-            goto gp_fault;
-
-        v->arch.cpuid_faulting = msr_content & MSR_MISC_FEATURES_CPUID_FAULTING;
-
-        if ( cpu_has_cpuid_faulting &&
-             (old_cpuid_faulting ^ v->arch.cpuid_faulting) )
-            ctxt_switch_levelling(v);
-        break;
-    }
 
     default:
         if ( passive_domain_do_wrmsr(msr, msr_content) )
@@ -4174,6 +4165,44 @@ static void lbr_tsx_fixup(void)
         msr->data |= ((LBR_FROM_SIGNEXT_2MSB & msr->data) << 2);
 }
 
+static void sign_extend_msr(u32 msr, int type)
+{
+    struct vmx_msr_entry *entry;
+
+    if ( (entry = vmx_find_msr(msr, type)) != NULL )
+    {
+        if ( entry->data & VADDR_TOP_BIT )
+            entry->data |= CANONICAL_MASK;
+        else
+            entry->data &= ~CANONICAL_MASK;
+    }
+}
+
+static void bdw_erratum_bdf14_fixup(void)
+{
+    /*
+     * Occasionally, on certain Broadwell CPUs MSR_IA32_LASTINTTOIP has
+     * been observed to have the top three bits corrupted as though the
+     * MSR is using the LBR_FORMAT_EIP_FLAGS_TSX format. This is
+     * incorrect and causes a vmentry failure -- the MSR should contain
+     * an offset into the current code segment. This is assumed to be
+     * erratum BDF14. Fix up MSR_IA32_LASTINT{FROM,TO}IP by
+     * sign-extending into bits 48:63.
+     */
+    sign_extend_msr(MSR_IA32_LASTINTFROMIP, VMX_GUEST_MSR);
+    sign_extend_msr(MSR_IA32_LASTINTTOIP, VMX_GUEST_MSR);
+}
+
+static void lbr_fixup(void)
+{
+    struct vcpu *curr = current;
+
+    if ( curr->arch.hvm_vmx.lbr_fixup_enabled & FIXUP_LBR_TSX )
+        lbr_tsx_fixup();
+    if ( curr->arch.hvm_vmx.lbr_fixup_enabled & FIXUP_BDW_ERRATUM_BDF14 )
+        bdw_erratum_bdf14_fixup();
+}
+
 void vmx_vmenter_helper(const struct cpu_user_regs *regs)
 {
     struct vcpu *curr = current;
@@ -4225,13 +4254,16 @@ void vmx_vmenter_helper(const struct cpu_user_regs *regs)
         if ( cpumask_test_cpu(cpu, ept->invalidate) )
         {
             cpumask_clear_cpu(cpu, ept->invalidate);
-            __invept(INVEPT_SINGLE_CONTEXT, ept->eptp, 0);
+            if ( nestedhvm_enabled(curr->domain) )
+                __invept(INVEPT_ALL_CONTEXT, 0, 0);
+            else
+                __invept(INVEPT_SINGLE_CONTEXT, ept->eptp, 0);
         }
     }
 
  out:
-    if ( unlikely(curr->arch.hvm_vmx.lbr_tsx_fixup_enabled) )
-        lbr_tsx_fixup();
+    if ( unlikely(curr->arch.hvm_vmx.lbr_fixup_enabled) )
+        lbr_fixup();
 
     HVMTRACE_ND(VMENTRY, 0, 1/*cycles*/, 0, 0, 0, 0, 0, 0, 0);
 

@@ -20,6 +20,7 @@
 
 #include <xen/lib.h>
 #include <xen/delay.h>
+#include <xen/libfdt/libfdt.h>
 #include <xen/mm.h>
 #include <xen/rbtree.h>
 #include <xen/sched.h>
@@ -505,6 +506,10 @@ static int gicv3_its_init_single_its(struct host_its *hw_its)
         return -ENOMEM;
     writeq_relaxed(0, hw_its->its_base + GITS_CWRITER);
 
+    /* Now enable interrupt translation and command processing on that ITS. */
+    reg = readl_relaxed(hw_its->its_base + GITS_CTLR);
+    writel_relaxed(reg | GITS_CTLR_ENABLE, hw_its->its_base + GITS_CTLR);
+
     return 0;
 }
 
@@ -794,6 +799,181 @@ out:
     xfree(dev);
 
     return ret;
+}
+
+/* Must be called with the its_device_lock held. */
+static struct its_device *get_its_device(struct domain *d, paddr_t vdoorbell,
+                                         uint32_t vdevid)
+{
+    struct rb_node *node = d->arch.vgic.its_devices.rb_node;
+    struct its_device *dev;
+
+    ASSERT(spin_is_locked(&d->arch.vgic.its_devices_lock));
+
+    while (node)
+    {
+        int cmp;
+
+        dev = rb_entry(node, struct its_device, rbnode);
+        cmp = compare_its_guest_devices(dev, vdoorbell, vdevid);
+
+        if ( !cmp )
+            return dev;
+
+        if ( cmp > 0 )
+            node = node->rb_left;
+        else
+            node = node->rb_right;
+    }
+
+    return NULL;
+}
+
+static struct pending_irq *get_event_pending_irq(struct domain *d,
+                                                 paddr_t vdoorbell_address,
+                                                 uint32_t vdevid,
+                                                 uint32_t eventid,
+                                                 uint32_t *host_lpi)
+{
+    struct its_device *dev;
+    struct pending_irq *pirq = NULL;
+
+    spin_lock(&d->arch.vgic.its_devices_lock);
+    dev = get_its_device(d, vdoorbell_address, vdevid);
+    if ( dev && eventid < dev->eventids )
+    {
+        pirq = &dev->pend_irqs[eventid];
+        if ( host_lpi )
+            *host_lpi = dev->host_lpi_blocks[eventid / LPI_BLOCK] +
+                        (eventid % LPI_BLOCK);
+    }
+    spin_unlock(&d->arch.vgic.its_devices_lock);
+
+    return pirq;
+}
+
+struct pending_irq *gicv3_its_get_event_pending_irq(struct domain *d,
+                                                    paddr_t vdoorbell_address,
+                                                    uint32_t vdevid,
+                                                    uint32_t eventid)
+{
+    return get_event_pending_irq(d, vdoorbell_address, vdevid, eventid, NULL);
+}
+
+int gicv3_remove_guest_event(struct domain *d, paddr_t vdoorbell_address,
+                             uint32_t vdevid, uint32_t eventid)
+{
+    uint32_t host_lpi = INVALID_LPI;
+
+    if ( !get_event_pending_irq(d, vdoorbell_address, vdevid, eventid,
+                                &host_lpi) )
+        return -EINVAL;
+
+    if ( host_lpi == INVALID_LPI )
+        return -EINVAL;
+
+    gicv3_lpi_update_host_entry(host_lpi, d->domain_id, INVALID_LPI);
+
+    return 0;
+}
+
+/*
+ * Connects the event ID for an already assigned device to the given VCPU/vLPI
+ * pair. The corresponding physical LPI is already mapped on the host side
+ * (when assigning the physical device to the guest), so we just connect the
+ * target VCPU/vLPI pair to that interrupt to inject it properly if it fires.
+ * Returns a pointer to the already allocated struct pending_irq that is
+ * meant to be used by that event.
+ */
+struct pending_irq *gicv3_assign_guest_event(struct domain *d,
+                                             paddr_t vdoorbell_address,
+                                             uint32_t vdevid, uint32_t eventid,
+                                             uint32_t virt_lpi)
+{
+    struct pending_irq *pirq;
+    uint32_t host_lpi = INVALID_LPI;
+
+    pirq = get_event_pending_irq(d, vdoorbell_address, vdevid, eventid,
+                                 &host_lpi);
+
+    if ( !pirq )
+        return NULL;
+
+    gicv3_lpi_update_host_entry(host_lpi, d->domain_id, virt_lpi);
+
+    return pirq;
+}
+
+/*
+ * Create the respective guest DT nodes from a list of host ITSes.
+ * This copies the reg property, so the guest sees the ITS at the same address
+ * as the host.
+ */
+int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
+                                  const struct dt_device_node *gic,
+                                  void *fdt)
+{
+    uint32_t len;
+    int res;
+    const void *prop = NULL;
+    const struct dt_device_node *its = NULL;
+    const struct host_its *its_data;
+
+    if ( list_empty(&host_its_list) )
+        return 0;
+
+    /* The sub-nodes require the ranges property */
+    prop = dt_get_property(gic, "ranges", &len);
+    if ( !prop )
+    {
+        printk(XENLOG_ERR "Can't find ranges property for the gic node\n");
+        return -FDT_ERR_XEN(ENOENT);
+    }
+
+    res = fdt_property(fdt, "ranges", prop, len);
+    if ( res )
+        return res;
+
+    list_for_each_entry(its_data, &host_its_list, entry)
+    {
+        its = its_data->dt_node;
+
+        res = fdt_begin_node(fdt, its->name);
+        if ( res )
+            return res;
+
+        res = fdt_property_string(fdt, "compatible", "arm,gic-v3-its");
+        if ( res )
+            return res;
+
+        res = fdt_property(fdt, "msi-controller", NULL, 0);
+        if ( res )
+            return res;
+
+        if ( its->phandle )
+        {
+            res = fdt_property_cell(fdt, "phandle", its->phandle);
+            if ( res )
+                return res;
+        }
+
+        /* Use the same reg regions as the ITS node in host DTB. */
+        prop = dt_get_property(its, "reg", &len);
+        if ( !prop )
+        {
+            printk(XENLOG_ERR "GICv3: Can't find ITS reg property.\n");
+            res = -FDT_ERR_XEN(ENOENT);
+            return res;
+        }
+
+        res = fdt_property(fdt, "reg", prop, len);
+        if ( res )
+            return res;
+
+        fdt_end_node(fdt);
+    }
+
+    return res;
 }
 
 /* Scan the DT for any ITS nodes and create a list of host ITSes out of it. */

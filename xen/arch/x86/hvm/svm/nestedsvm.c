@@ -357,7 +357,7 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
     struct vmcb_struct *host_vmcb = arch_svm->vmcb;
     unsigned long *ns_msrpm_ptr;
     unsigned int i;
-    enum hvm_copy_result ret;
+    enum hvm_translation_result ret;
     unsigned long *ns_viomap;
     bool_t ioport_80 = 1, ioport_ed = 1;
 
@@ -365,7 +365,8 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
 
     ret = hvm_copy_from_guest_phys(svm->ns_cached_msrpm,
                                    ns_vmcb->_msrpm_base_pa, MSRPM_SIZE);
-    if (ret != HVMCOPY_okay) {
+    if ( ret != HVMTRANS_okay )
+    {
         gdprintk(XENLOG_ERR, "hvm_copy_from_guest_phys msrpm %u\n", ret);
         return 1;
     }
@@ -658,13 +659,13 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* Cleanbits */
     n2vmcb->cleanbits.bytes = 0;
 
-    rc = svm_vmcb_isvalid(__func__, ns_vmcb, 1);
+    rc = svm_vmcb_isvalid(__func__, ns_vmcb, v, true);
     if (rc) {
         gdprintk(XENLOG_ERR, "virtual vmcb invalid\n");
         return NSVM_ERROR_VVMCB;
     }
 
-    rc = svm_vmcb_isvalid(__func__, n2vmcb, 1);
+    rc = svm_vmcb_isvalid(__func__, n2vmcb, v, true);
     if (rc) {
         gdprintk(XENLOG_ERR, "n2vmcb invalid\n");
         return NSVM_ERROR_VMENTRY;

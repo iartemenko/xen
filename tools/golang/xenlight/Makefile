@@ -38,6 +38,9 @@ install: build
 	$(INSTALL_DIR) $(DESTDIR)$(GOXL_INSTALL_DIR)
 	$(INSTALL_DATA) $(XEN_GOPATH)$(GOXL_PKG_DIR)$(PKGSOURCES) $(DESTDIR)$(GOXL_INSTALL_DIR)
 
+.PHONY: uninstall
+	rm -f $(addprefix $(DESTDIR)$(GOXL_INSTALL_DIR)/, $(PKGSOURCES))
+
 .PHONY: clean
 clean:
 	$(RM) -r $(XEN_GOPATH)$(GOXL_PKG_DIR)
@@ -46,4 +49,4 @@ clean:
 .PHONY: distclean
 distclean: clean
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

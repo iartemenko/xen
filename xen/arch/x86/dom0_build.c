@@ -47,7 +47,8 @@ static long __init parse_amt(const char *s, const char **ps)
     long pages = parse_size_and_unit((*s == '-') ? s+1 : s, ps) >> PAGE_SHIFT;
     return (*s == '-') ? -pages : pages;
 }
-static void __init parse_dom0_mem(const char *s)
+
+static int __init parse_dom0_mem(const char *s)
 {
     do {
         if ( !strncmp(s, "min:", 4) )
@@ -57,13 +58,15 @@ static void __init parse_dom0_mem(const char *s)
         else
             dom0_nrpages = parse_amt(s, &s);
     } while ( *s++ == ',' );
+
+    return s[-1] ? -EINVAL : 0;
 }
 custom_param("dom0_mem", parse_dom0_mem);
 
 static unsigned int __initdata opt_dom0_max_vcpus_min = 1;
 static unsigned int __initdata opt_dom0_max_vcpus_max = UINT_MAX;
 
-static void __init parse_dom0_max_vcpus(const char *s)
+static int __init parse_dom0_max_vcpus(const char *s)
 {
     if ( *s == '-' )                   /* -M */
         opt_dom0_max_vcpus_max = simple_strtoul(s + 1, &s, 0);
@@ -77,32 +80,42 @@ static void __init parse_dom0_max_vcpus(const char *s)
         else if ( *s++ == '-' && *s ) /* N-M */
             opt_dom0_max_vcpus_max = simple_strtoul(s, &s, 0);
     }
+
+    return *s ? -EINVAL : 0;
 }
 custom_param("dom0_max_vcpus", parse_dom0_max_vcpus);
 
 static __initdata unsigned int dom0_nr_pxms;
 static __initdata unsigned int dom0_pxms[MAX_NUMNODES] =
     { [0 ... MAX_NUMNODES - 1] = ~0 };
-static __initdata bool_t dom0_affinity_relaxed;
+static __initdata bool dom0_affinity_relaxed;
 
-static void __init parse_dom0_nodes(const char *s)
+static int __init parse_dom0_nodes(const char *s)
 {
     do {
         if ( isdigit(*s) )
+        {
+            if ( dom0_nr_pxms >= ARRAY_SIZE(dom0_pxms) )
+                return -E2BIG;
             dom0_pxms[dom0_nr_pxms] = simple_strtoul(s, &s, 0);
+            if ( !*s || *s == ',' )
+                ++dom0_nr_pxms;
+        }
         else if ( !strncmp(s, "relaxed", 7) && (!s[7] || s[7] == ',') )
         {
-            dom0_affinity_relaxed = 1;
+            dom0_affinity_relaxed = true;
             s += 7;
         }
         else if ( !strncmp(s, "strict", 6) && (!s[6] || s[6] == ',') )
         {
-            dom0_affinity_relaxed = 0;
+            dom0_affinity_relaxed = false;
             s += 6;
         }
         else
-            break;
-    } while ( ++dom0_nr_pxms < ARRAY_SIZE(dom0_pxms) && *s++ == ',' );
+            return -EINVAL;
+    } while ( *s++ == ',' );
+
+    return s[-1] ? -EINVAL : 0;
 }
 custom_param("dom0_nodes", parse_dom0_nodes);
 
@@ -183,32 +196,37 @@ bool __initdata dom0_pvh;
  *  - pvh               Create a PVHv2 Dom0.
  *  - shadow            Use shadow paging for Dom0.
  */
-static void __init parse_dom0_param(char *s)
+static int __init parse_dom0_param(const char *s)
 {
-    char *ss;
+    const char *ss;
+    int rc = 0;
 
     do {
 
         ss = strchr(s, ',');
-        if ( ss )
-            *ss = '\0';
+        if ( !ss )
+            ss = strchr(s, '\0');
 
-        if ( !strcmp(s, "pvh") )
+        if ( !strncmp(s, "pvh", ss - s) )
             dom0_pvh = true;
 #ifdef CONFIG_SHADOW_PAGING
-        else if ( !strcmp(s, "shadow") )
+        else if ( !strncmp(s, "shadow", ss - s) )
             opt_dom0_shadow = true;
 #endif
+        else
+            rc = -EINVAL;
 
         s = ss + 1;
-    } while ( ss );
+    } while ( *ss );
+
+    return rc;
 }
 custom_param("dom0", parse_dom0_param);
 
 static char __initdata opt_dom0_ioports_disable[200] = "";
 string_param("dom0_ioports_disable", opt_dom0_ioports_disable);
 
-static bool_t __initdata ro_hpet = 1;
+static bool __initdata ro_hpet = true;
 boolean_param("ro-hpet", ro_hpet);
 
 unsigned int __initdata dom0_memflags = MEMF_no_dma|MEMF_exact_node;
@@ -229,7 +247,7 @@ unsigned long __init dom0_compute_nr_pages(
 {
     nodeid_t node;
     unsigned long avail = 0, nr_pages, min_pages, max_pages;
-    bool_t need_paging;
+    bool need_paging;
 
     for_each_node_mask ( node, dom0_nodes )
         avail += avail_domheap_pages_region(node, 0, 0) +
@@ -253,7 +271,7 @@ unsigned long __init dom0_compute_nr_pages(
 
     need_paging = is_hvm_domain(d) &&
         (!iommu_hap_pt_share || !paging_mode_hap(d));
-    for ( ; ; need_paging = 0 )
+    for ( ; ; need_paging = false )
     {
         nr_pages = dom0_nrpages;
         min_pages = dom0_min_nrpages;

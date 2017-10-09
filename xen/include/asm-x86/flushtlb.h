@@ -55,7 +55,7 @@ static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp)
 
     for_each_cpu ( cpu, mask )
         if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) )
-            cpumask_clear_cpu(cpu, mask);
+            __cpumask_clear_cpu(cpu, mask);
 }
 
 void new_tlbflush_clock_period(void);
@@ -118,7 +118,7 @@ void flush_area_mask(const cpumask_t *, const void *va, unsigned int flags);
 #define flush_tlb_one_all(v)                    \
     flush_tlb_one_mask(&cpu_online_map, v)
 
-static inline void flush_page_to_ram(unsigned long mfn) {}
+static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache) {}
 static inline int invalidate_dcache_va_range(const void *p,
                                              unsigned long size)
 { return -EOPNOTSUPP; }

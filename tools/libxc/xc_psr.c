@@ -266,6 +266,9 @@ int xc_psr_cat_set_domain_data(xc_interface *xch, uint32_t domid,
     case XC_PSR_CAT_L3_CBM_DATA:
         cmd = XEN_DOMCTL_PSR_CAT_OP_SET_L3_DATA;
         break;
+    case XC_PSR_CAT_L2_CBM:
+        cmd = XEN_DOMCTL_PSR_CAT_OP_SET_L2_CBM;
+        break;
     default:
         errno = EINVAL;
         return -1;
@@ -299,6 +302,9 @@ int xc_psr_cat_get_domain_data(xc_interface *xch, uint32_t domid,
     case XC_PSR_CAT_L3_CBM_DATA:
         cmd = XEN_DOMCTL_PSR_CAT_OP_GET_L3_DATA;
         break;
+    case XC_PSR_CAT_L2_CBM:
+        cmd = XEN_DOMCTL_PSR_CAT_OP_GET_L2_CBM;
+        break;
     default:
         errno = EINVAL;
         return -1;
@@ -317,24 +323,41 @@ int xc_psr_cat_get_domain_data(xc_interface *xch, uint32_t domid,
     return rc;
 }
 
-int xc_psr_cat_get_l3_info(xc_interface *xch, uint32_t socket,
-                           uint32_t *cos_max, uint32_t *cbm_len,
-                           bool *cdp_enabled)
+int xc_psr_cat_get_info(xc_interface *xch, uint32_t socket, unsigned int lvl,
+                        uint32_t *cos_max, uint32_t *cbm_len, bool *cdp_enabled)
 {
-    int rc;
+    int rc = -1;
     DECLARE_SYSCTL;
 
     sysctl.cmd = XEN_SYSCTL_psr_cat_op;
-    sysctl.u.psr_cat_op.cmd = XEN_SYSCTL_PSR_CAT_get_l3_info;
     sysctl.u.psr_cat_op.target = socket;
 
-    rc = xc_sysctl(xch, &sysctl);
-    if ( !rc )
+    switch ( lvl )
     {
-        *cos_max = sysctl.u.psr_cat_op.u.l3_info.cos_max;
-        *cbm_len = sysctl.u.psr_cat_op.u.l3_info.cbm_len;
-        *cdp_enabled = sysctl.u.psr_cat_op.u.l3_info.flags &
-                       XEN_SYSCTL_PSR_CAT_L3_CDP;
+    case 2:
+        sysctl.u.psr_cat_op.cmd = XEN_SYSCTL_PSR_CAT_get_l2_info;
+        rc = xc_sysctl(xch, &sysctl);
+        if ( !rc )
+        {
+            *cos_max = sysctl.u.psr_cat_op.u.cat_info.cos_max;
+            *cbm_len = sysctl.u.psr_cat_op.u.cat_info.cbm_len;
+            *cdp_enabled = false;
+        }
+        break;
+    case 3:
+        sysctl.u.psr_cat_op.cmd = XEN_SYSCTL_PSR_CAT_get_l3_info;
+        rc = xc_sysctl(xch, &sysctl);
+        if ( !rc )
+        {
+            *cos_max = sysctl.u.psr_cat_op.u.cat_info.cos_max;
+            *cbm_len = sysctl.u.psr_cat_op.u.cat_info.cbm_len;
+            *cdp_enabled = sysctl.u.psr_cat_op.u.cat_info.flags &
+                           XEN_SYSCTL_PSR_CAT_L3_CDP;
+        }
+        break;
+    default:
+        errno = EOPNOTSUPP;
+        break;
     }
 
     return rc;

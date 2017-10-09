@@ -1,9 +1,11 @@
 .hg
+.*.tmp
 *.orig
 *~
 *.swp
 *.o
 *.d
+*.d2
 *.opic
 *.a
 *.so
@@ -27,6 +29,7 @@ cscope.in.out
 cscope.out
 cscope.po.out
 .config
+.vimrc
 
 dist
 stubdom/*.tar.gz
@@ -205,6 +208,7 @@ tools/misc/xc_shadow
 tools/misc/xen_cpuperf
 tools/misc/xen-cpuid
 tools/misc/xen-detect
+tools/misc/xen-diag
 tools/misc/xen-tmem-list-parse
 tools/misc/xen-livepatch
 tools/misc/xenperf
@@ -226,7 +230,7 @@ tools/tests/x86_emulator/*.tmp
 tools/tests/x86_emulator/asm
 tools/tests/x86_emulator/avx*.h
 tools/tests/x86_emulator/blowfish.h
-tools/tests/x86_emulator/sse*.h
+tools/tests/x86_emulator/sse*.[ch]
 tools/tests/x86_emulator/test_x86_emulator
 tools/tests/x86_emulator/x86_emulate
 tools/tests/xen-access/xen-access
@@ -299,6 +303,7 @@ xen/include/xen/compile.h
 xen/test/livepatch/config.h
 xen/test/livepatch/xen_bye_world.livepatch
 xen/test/livepatch/xen_hello_world.livepatch
+xen/test/livepatch/xen_nop.livepatch
 xen/test/livepatch/xen_replace_world.livepatch
 xen/tools/kconfig/.tmp_gtkcheck
 xen/tools/kconfig/.tmp_qtcheck

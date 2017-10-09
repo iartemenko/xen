@@ -248,8 +248,7 @@ static void hap_clean_dirty_bitmap(struct domain *d)
 /************************************************/
 static struct page_info *hap_alloc(struct domain *d)
 {
-    struct page_info *pg = NULL;
-    void *p;
+    struct page_info *pg;
 
     ASSERT(paging_locked_by_me(d));
 
@@ -259,9 +258,7 @@ static struct page_info *hap_alloc(struct domain *d)
 
     d->arch.paging.hap.free_pages--;
 
-    p = __map_domain_page(pg);
-    clear_page(p);
-    unmap_domain_page(p);
+    clear_domain_page(page_to_mfn(pg));
 
     return pg;
 }
@@ -408,12 +405,11 @@ static void hap_install_xen_entries_in_l4(struct vcpu *v, mfn_t l4mfn)
 
     /* Install the per-domain mappings for this domain */
     l4e[l4_table_offset(PERDOMAIN_VIRT_START)] =
-        l4e_from_pfn(mfn_x(page_to_mfn(d->arch.perdomain_l3_pg)),
-                     __PAGE_HYPERVISOR);
+        l4e_from_page(d->arch.perdomain_l3_pg, __PAGE_HYPERVISOR_RW);
 
     /* Install a linear mapping */
     l4e[l4_table_offset(LINEAR_PT_VIRT_START)] =
-        l4e_from_pfn(mfn_x(l4mfn), __PAGE_HYPERVISOR);
+        l4e_from_mfn(l4mfn, __PAGE_HYPERVISOR_RW);
 
     unmap_domain_page(l4e);
 }
@@ -576,8 +572,7 @@ void hap_teardown(struct domain *d, bool *preempted)
     ASSERT(d->is_dying);
     ASSERT(d != current->domain);
 
-    if ( !paging_locked_by_me(d) )
-        paging_lock(d); /* Keep various asserts happy */
+    paging_lock(d); /* Keep various asserts happy */
 
     if ( paging_mode_enabled(d) )
     {
@@ -613,8 +608,8 @@ out:
     paging_unlock(d);
 }
 
-int hap_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-               XEN_GUEST_HANDLE_PARAM(void) u_domctl)
+int hap_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
+               XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     int rc;
     bool preempted = false;
@@ -724,7 +719,7 @@ static void hap_update_paging_modes(struct vcpu *v)
     {
         mfn_t mmfn = hap_make_monitor_table(v);
         v->arch.monitor_table = pagetable_from_mfn(mmfn);
-        make_cr3(v, mfn_x(mmfn));
+        make_cr3(v, mmfn);
         hvm_update_host_cr3(v);
     }
 
@@ -754,8 +749,8 @@ hap_write_p2m_entry(struct domain *d, unsigned long gfn, l1_pgentry_t *p,
          && !p2m_get_hostp2m(d)->defer_nested_flush ) {
         /* We are replacing a valid entry so we need to flush nested p2ms,
          * unless the only change is an increase in access rights. */
-        mfn_t omfn = _mfn(l1e_get_pfn(*p));
-        mfn_t nmfn = _mfn(l1e_get_pfn(new));
+        mfn_t omfn = l1e_get_mfn(*p);
+        mfn_t nmfn = l1e_get_mfn(new);
         flush_nestedp2m = !( mfn_x(omfn) == mfn_x(nmfn)
             && perms_strictly_increased(old_flags, l1e_get_flags(new)) );
     }

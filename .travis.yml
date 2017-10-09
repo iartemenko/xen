@@ -35,5 +35,46 @@ addons:
         build_command: "make xen -j$NUMCPUS XEN_TARGET_ARCH=$XEN_TARGET_ARCH CROSS_COMPILE=$CROSS_COMPILE XSM_ENABLE=y CONFIG_QEMU_XEN=n"
         branch_pattern: coverity-scan
 
+    apt:
+        sources:
+            - ubuntu-toolchain-r-test
+        packages:
+            - zlib1g-dev
+            - libncurses5-dev
+            - libssl-dev
+            - python2.7-dev
+            - xorg-dev
+            - uuid-dev
+            - libyajl-dev
+            - libaio-dev
+            - libglib2.0-dev
+            - libpixman-1-dev
+            - pkg-config
+            - flex
+            - bison
+            - gettext
+            - acpica-tools
+            - bin86
+            - bcc
+            - libc6-dev-i386
+            - libnl-3-dev
+            - ocaml-nox
+            - libfindlib-ocaml-dev
+            - markdown
+            - transfig
+            - pandoc
+            - gcc-arm-linux-gnueabihf
+            - gcc-aarch64-linux-gnu
+            - gcc-5
+            - g++-5
+            - seabios
+            - checkpolicy
+            - ghostscript
+# we must set CXX manually instead of using 'language: cpp' due to
+# travis-ci/travis-ci#3871
+before_script:
+    - export CXX=${CC/cc/++}
+    - export CXX=${CXX/clang/clang++}
+
 script:
     - if [ "${COVERITY_SCAN_BRANCH}" != 1 ]; then make xen -j$NUMCPUS XEN_TARGET_ARCH=$XEN_TARGET_ARCH CROSS_COMPILE=$CROSS_COMPILE XSM_ENABLE=y CONFIG_QEMU_XEN=n; fi

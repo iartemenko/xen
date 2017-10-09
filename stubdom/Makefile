@@ -228,6 +228,7 @@ tpm_emulator-$(XEN_TARGET_ARCH): tpm_emulator-$(TPMEMU_VERSION).tar.gz
 	patch -d $@ -p1 < vtpm-deepquote.patch
 	patch -d $@ -p1 < vtpm-deepquote-anyloc.patch
 	patch -d $@ -p1 < vtpm-cmake-Wextra.patch
+	patch -d $@ -p1 < vtpm-implicit-fallthrough.patch
 	mkdir $@/build
 	cd $@/build; CC=${CC} $(CMAKE) .. -DCMAKE_C_FLAGS:STRING="-std=c99 -DTPM_NO_EXTERN $(TARGET_CPPFLAGS) $(TARGET_CFLAGS) -Wno-declaration-after-statement"
 	touch $@
@@ -295,10 +296,12 @@ ioemu/linkfarm.stamp: $(XEN_ROOT)/tools/qemu-xen-traditional-dir
 	$(buildmakevars2shellvars);						\
 	cd ioemu;								\
 	src="$$XEN_ROOT/tools/qemu-xen-traditional-dir"; export src;		\
-	(cd $$src && find * -type d -print) | xargs mkdir -p;			\
-	(cd $$src && find *	! -type l  -type f  $(addprefix ! -name ,	\
+	(cd $$src && find * -type d						\
+		$(addprefix ! -path , '*-softmmu*' '*-linux-user*') -print)	\
+		| xargs mkdir -p;						\
+	(cd $$src && find *	! -type l  -type f  $(addprefix ! -path ,	\
 			'*.[oda1]' 'config-*' config.mak qemu-dm qemu-img-xen	\
-			'*.html' '*.pod'					\
+			'*.html' '*.pod' '*-softmmu*' '*-linux-user*'		\
 			)) >linkfarm.stamp.tmp;				\
 	cmp -s linkfarm.stamp.tmp linkfarm.stamp &&			\
 		rm linkfarm.stamp.tmp || {				\
@@ -353,7 +356,6 @@ LINK_DIRS := libxc-$(XEN_TARGET_ARCH) xenstore $(foreach dir,$(LINK_LIBS_DIRS),l
 LINK_STAMPS := $(foreach dir,$(LINK_DIRS),$(dir)/stamp)
 
 mk-headers-$(XEN_TARGET_ARCH): $(IOEMU_LINKFARM_TARGET) $(LINK_STAMPS)
-	$(MAKE) -C $(XEN_ROOT)/tools/include
 	mkdir -p include/xen && \
           ln -sf $(wildcard $(XEN_ROOT)/xen/include/public/*.h) include/xen && \
           ln -sf $(addprefix $(XEN_ROOT)/xen/include/public/,arch-x86 hvm io xsm) include/xen && \
@@ -603,6 +605,37 @@ install-vtpm: vtpm-stubdom
 install-vtpmmgr: vtpmmgr-stubdom
 	$(INSTALL_DIR) "$(DESTDIR)$(XENFIRMWAREDIR)"
 	$(INSTALL_PROG) mini-os-$(XEN_TARGET_ARCH)-vtpmmgr/mini-os.gz "$(DESTDIR)$(XENFIRMWAREDIR)/vtpmmgr-stubdom.gz"
+
+###########
+# uninstall
+###########
+
+ifeq (x$(STUBDOM_UNINSTALL),x)
+STUBDOM_UNINSTALL=$(patsubst install-%,uninstall-%,$(STUBDOM_INSTALL))
+endif
+
+ifeq ($(STUBDOM_SUPPORTED),1)
+uninstall: $(STUBDOM_UNINSTALL)
+else
+uninstall:
+endif
+
+uninstall-ioemu:
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/stubdom-dm
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/stubdompath.sh
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/ioemu-stubdom.gz
+
+uninstall-grub:
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/pv-grub-$(XEN_TARGET_ARCH).gz
+
+uninstall-xenstore:
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/xenstore-stubdom.gz
+
+uninstall-vtpm:
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/vtpm-stubdom.gz
+
+uninstall-vtpmmgr:
+	rm -f $(DESTDIR)$(XENFIRMWAREDIR)/vtpmmgr-stubdom.gz
 
 #######
 # clean

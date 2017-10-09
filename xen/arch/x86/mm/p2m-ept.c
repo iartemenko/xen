@@ -225,16 +225,16 @@ static void ept_p2m_type_to_flags(struct p2m_domain *p2m, ept_entry_t *entry,
 /* Fill in middle levels of ept table */
 static int ept_set_middle_entry(struct p2m_domain *p2m, ept_entry_t *ept_entry)
 {
-    struct page_info *pg;
+    mfn_t mfn;
     ept_entry_t *table;
     unsigned int i;
 
-    pg = p2m_alloc_ptp(p2m, 0);
-    if ( pg == NULL )
+    mfn = p2m_alloc_ptp(p2m, 0);
+    if ( mfn_eq(mfn, INVALID_MFN) )
         return 0;
 
     ept_entry->epte = 0;
-    ept_entry->mfn = page_to_mfn(pg);
+    ept_entry->mfn = mfn_x(mfn);
     ept_entry->access = p2m->default_access;
 
     ept_entry->r = ept_entry->w = ept_entry->x = 1;
@@ -243,7 +243,7 @@ static int ept_set_middle_entry(struct p2m_domain *p2m, ept_entry_t *ept_entry)
 
     ept_entry->suppress_ve = 1;
 
-    table = __map_domain_page(pg);
+    table = map_domain_page(mfn);
 
     for ( i = 0; i < EPT_PAGETABLE_ENTRIES; i++ )
         table[i].suppress_ve = 1;
@@ -674,13 +674,15 @@ bool_t ept_handle_misconfig(uint64_t gpa)
  * Returns: 0 for success, -errno for failure
  */
 static int
-ept_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn, 
+ept_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
               unsigned int order, p2m_type_t p2mt, p2m_access_t p2ma,
               int sve)
 {
     ept_entry_t *table, *ept_entry = NULL;
+    unsigned long gfn = gfn_x(gfn_);
     unsigned long gfn_remainder = gfn;
     unsigned int i, target = order / EPT_TABLE_ORDER;
+    unsigned long fn_mask = !mfn_eq(mfn, INVALID_MFN) ? (gfn | mfn_x(mfn)) : gfn;
     int ret, rc = 0;
     bool_t entry_written = 0;
     bool_t direct_mmio = (p2mt == p2m_mmio_direct);
@@ -701,7 +703,7 @@ ept_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
      * 2. gfn not exceeding guest physical address width.
      * 3. passing a valid order.
      */
-    if ( ((gfn | mfn_x(mfn)) & ((1UL << order) - 1)) ||
+    if ( (fn_mask & ((1UL << order) - 1)) ||
          ((u64)gfn >> ((ept->wl + 1) * EPT_TABLE_ORDER)) ||
          (order % EPT_TABLE_ORDER) )
         return -EINVAL;
@@ -909,11 +911,12 @@ out:
 
 /* Read ept p2m entries */
 static mfn_t ept_get_entry(struct p2m_domain *p2m,
-                           unsigned long gfn, p2m_type_t *t, p2m_access_t* a,
+                           gfn_t gfn_, p2m_type_t *t, p2m_access_t* a,
                            p2m_query_t q, unsigned int *page_order,
                            bool_t *sve)
 {
     ept_entry_t *table = map_domain_page(_mfn(pagetable_get_pfn(p2m_get_pagetable(p2m))));
+    unsigned long gfn = gfn_x(gfn_);
     unsigned long gfn_remainder = gfn;
     ept_entry_t *ept_entry;
     u32 index;
@@ -962,7 +965,7 @@ static mfn_t ept_get_entry(struct p2m_domain *p2m,
             index = gfn_remainder >> ( i * EPT_TABLE_ORDER);
             ept_entry = table + index;
 
-            if ( !p2m_pod_demand_populate(p2m, gfn, i * EPT_TABLE_ORDER, q) )
+            if ( p2m_pod_demand_populate(p2m, gfn_, i * EPT_TABLE_ORDER) )
                 goto retry;
             else
                 goto out;
@@ -984,8 +987,7 @@ static mfn_t ept_get_entry(struct p2m_domain *p2m,
 
         ASSERT(i == 0);
         
-        if ( p2m_pod_demand_populate(p2m, gfn, 
-                                        PAGE_ORDER_4K, q) )
+        if ( !p2m_pod_demand_populate(p2m, gfn_, PAGE_ORDER_4K) )
             goto out;
     }
 
@@ -1152,8 +1154,13 @@ static void ept_sync_domain_prepare(struct p2m_domain *p2m)
     struct domain *d = p2m->domain;
     struct ept_data *ept = &p2m->ept;
 
-    if ( nestedhvm_enabled(d) && !p2m_is_nestedp2m(p2m) )
-        p2m_flush_nestedp2m(d);
+    if ( nestedhvm_enabled(d) )
+    {
+        if ( p2m_is_nestedp2m(p2m) )
+            ept = &p2m_get_hostp2m(d)->ept;
+        else
+            p2m_flush_nestedp2m(d);
+    }
 
     /*
      * Need to invalidate on all PCPUs because either:
@@ -1238,6 +1245,7 @@ int ept_p2m_init(struct p2m_domain *p2m)
 
     p2m->set_entry = ept_set_entry;
     p2m->get_entry = ept_get_entry;
+    p2m->recalc = resolve_misconfig;
     p2m->change_entry_type_global = ept_change_entry_type_global;
     p2m->change_entry_type_range = ept_change_entry_type_range;
     p2m->memory_type_changed = ept_memory_type_changed;

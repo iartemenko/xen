@@ -132,7 +132,7 @@ clean:
 	rm -f xs_tdb_dump xenstore-control init-xenstore-domain
 	rm -f xenstore $(CLIENTS)
 	rm -f xenstore.pc
-	$(RM) $(DEPS)
+	$(RM) $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
@@ -173,6 +173,36 @@ endif
 	ln -sf xenstore-compat/xs_lib.h $(DESTDIR)$(includedir)/xs_lib.h
 	$(INSTALL_DATA) xenstore.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenstore.pc
+	rm -f $(DESTDIR)$(includedir)/xs_lib.h
+	rm -f $(DESTDIR)$(includedir)/xs.h
+	rm -f $(DESTDIR)$(includedir)/xenstore-compat/xs_lib.h
+	rm -f $(DESTDIR)$(includedir)/xenstore-compat/xs.h
+	rm -f $(DESTDIR)$(includedir)/xenstore_lib.h
+	rm -f $(DESTDIR)$(includedir)/xenstore.h
+	rm -f $(DESTDIR)$(libdir)/libxenstore.a
+	rm -f $(DESTDIR)$(libdir)/libxenstore.so
+	rm -f $(DESTDIR)$(libdir)/libxenstore.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenstore.so.$(MAJOR).$(MINOR)
+	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(CLIENTS))
+	rm -f $(DESTDIR)$(bindir)/xenstore
+	rm -f $(DESTDIR)$(bindir)/xenstore-control
+ifeq ($(XENSTORE_XENSTORED),y)
+	rm -f $(DESTDIR)$(sbindir)/xenstored
+	if [ -d $(DESTDIR)$(XEN_LIB_STORED) ]; then \
+		rmdir --ignore-fail-on-non-empty $(DESTDIR)$(XEN_LIB_STORED); \
+	fi
+endif
+	if [ -d $(DESTDIR)$(includedir)/xenstore-compat ]; then \
+		rmdir --ignore-fail-on-non-empty $(DESTDIR)$(includedir)/xenstore-compat; \
+	fi
+
+.PHONY: clients-uninstall
+clients-uninstall:
+	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(CLIENTS))
+
 .PHONY: clients-install
 clients-install: clients
 	$(INSTALL_DIR) $(DESTDIR)$(bindir)
@@ -181,7 +211,7 @@ clients-install: clients
 		ln -f $(DESTDIR)$(bindir)/xenstore $(DESTDIR)$(bindir)/$${c} ; \
 	done
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)
 
 # never delete any intermediate files.
 .SECONDARY:

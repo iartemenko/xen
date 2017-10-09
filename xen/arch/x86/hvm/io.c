@@ -59,7 +59,7 @@ void send_timeoffset_req(unsigned long timeoff)
     if ( timeoff == 0 )
         return;
 
-    if ( hvm_broadcast_ioreq(&p, 1) != 0 )
+    if ( hvm_broadcast_ioreq(&p, true) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
 }
 
@@ -73,7 +73,7 @@ void send_invalidate_req(void)
         .data = ~0UL, /* flush all */
     };
 
-    if ( hvm_broadcast_ioreq(&p, 0) != 0 )
+    if ( hvm_broadcast_ioreq(&p, false) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful map-cache invalidate\n");
 }
 
@@ -96,8 +96,13 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
     switch ( rc )
     {
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt);
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
         return false;
+
+    case X86EMUL_UNRECOGNIZED:
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
+        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        break;
 
     case X86EMUL_EXCEPTION:
         hvm_inject_event(&ctxt.ctxt.event);
@@ -254,6 +259,25 @@ void register_g2m_portio_handler(struct domain *d)
 
     handler->type = IOREQ_TYPE_PIO;
     handler->ops = &g2m_portio_ops;
+}
+
+unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
+                                 unsigned int *bus, unsigned int *slot,
+                                 unsigned int *func)
+{
+    unsigned int bdf;
+
+    ASSERT(CF8_ENABLED(cf8));
+
+    bdf = CF8_BDF(cf8);
+    *bus = PCI_BUS(bdf);
+    *slot = PCI_SLOT(bdf);
+    *func = PCI_FUNC(bdf);
+    /*
+     * NB: the lower 2 bits of the register address are fetched from the
+     * offset into the 0xcfc register when reading/writing to it.
+     */
+    return CF8_ADDR_LO(cf8) | (addr & 3);
 }
 
 /*

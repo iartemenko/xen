@@ -245,12 +245,15 @@ static int late_hwdom_init(struct domain *d)
 
 static unsigned int __read_mostly extra_hwdom_irqs;
 static unsigned int __read_mostly extra_domU_irqs = 32;
-static void __init parse_extra_guest_irqs(const char *s)
+
+static int __init parse_extra_guest_irqs(const char *s)
 {
     if ( isdigit(*s) )
         extra_domU_irqs = simple_strtoul(s, &s, 0);
     if ( *s == ',' && isdigit(*++s) )
         extra_hwdom_irqs = simple_strtoul(s, &s, 0);
+
+    return *s ? -EINVAL : 0;
 }
 custom_param("extra_guest_irqs", parse_extra_guest_irqs);
 
@@ -363,9 +366,6 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
         poolid = 0;
 
         err = -ENOMEM;
-        d->vm_event = xzalloc(struct vm_event_per_domain);
-        if ( !d->vm_event )
-            goto fail;
 
         d->pbuf = xzalloc_array(char, DOMAIN_PBUF_SIZE);
         if ( !d->pbuf )
@@ -403,7 +403,6 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
     if ( hardware_domain == d )
         hardware_domain = old_hwdom;
     atomic_set(&d->refcnt, DOMAIN_DESTROYED);
-    xfree(d->vm_event);
     xfree(d->pbuf);
     if ( init_status & INIT_arch )
         arch_domain_destroy(d);
@@ -820,7 +819,14 @@ static void complete_domain_destroy(struct rcu_head *head)
     free_xenoprof_pages(d);
 #endif
 
-    xfree(d->vm_event);
+#ifdef CONFIG_HAS_MEM_PAGING
+    xfree(d->vm_event_paging);
+#endif
+    xfree(d->vm_event_monitor);
+#ifdef CONFIG_HAS_MEM_SHARING
+    xfree(d->vm_event_share);
+#endif
+
     xfree(d->pbuf);
 
     for ( i = d->max_vcpus - 1; i >= 0; i-- )

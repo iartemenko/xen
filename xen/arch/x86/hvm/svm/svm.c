@@ -72,11 +72,13 @@ static void svm_update_guest_efer(struct vcpu *);
 
 static struct hvm_function_table svm_function_table;
 
-/* va of hardware host save area     */
-static DEFINE_PER_CPU_READ_MOSTLY(void *, hsa);
-
-/* vmcb used for extended host state */
-static DEFINE_PER_CPU_READ_MOSTLY(void *, root_vmcb);
+/*
+ * Physical addresses of the Host State Area (for hardware) and vmcb (for Xen)
+ * which contains Xen's fs/gs/tr/ldtr and GSBASE/STAR/SYSENTER state when in
+ * guest vcpu context.
+ */
+static DEFINE_PER_CPU_READ_MOSTLY(paddr_t, hsa);
+static DEFINE_PER_CPU_READ_MOSTLY(paddr_t, host_vmcb);
 
 static bool_t amd_erratum383_found __read_mostly;
 
@@ -526,9 +528,9 @@ static int svm_guest_x86_mode(struct vcpu *v)
         return 0;
     if ( unlikely(guest_cpu_user_regs()->eflags & X86_EFLAGS_VM) )
         return 1;
-    if ( hvm_long_mode_active(v) && likely(vmcb->cs.attr.fields.l) )
+    if ( hvm_long_mode_active(v) && likely(vmcb->cs.l) )
         return 8;
-    return (likely(vmcb->cs.attr.fields.db) ? 4 : 2);
+    return likely(vmcb->cs.db) ? 4 : 2;
 }
 
 void svm_update_guest_cr(struct vcpu *v, unsigned int cr)
@@ -574,6 +576,24 @@ void svm_update_guest_cr(struct vcpu *v, unsigned int cr)
         if ( paging_mode_hap(v->domain) )
             value &= ~X86_CR4_PAE;
         value |= v->arch.hvm_vcpu.guest_cr[4];
+
+        if ( !hvm_paging_enabled(v) )
+        {
+            /*
+             * When the guest thinks paging is disabled, Xen may need to hide
+             * the effects of shadow paging, as hardware runs with the host
+             * paging settings, rather than the guests settings.
+             *
+             * Without CR0.PG, all memory accesses are user mode, so
+             * _PAGE_USER must be set in the shadow pagetables for guest
+             * userspace to function.  This in turn trips up guest supervisor
+             * mode if SMEP/SMAP are left active in context.  They wouldn't
+             * have any effect if paging was actually disabled, so hide them
+             * behind the back of the guest.
+             */
+            value &= ~(X86_CR4_SMEP | X86_CR4_SMAP);
+        }
+
         vmcb_set_cr4(vmcb, value);
         break;
     default:
@@ -634,43 +654,39 @@ static void svm_get_segment_register(struct vcpu *v, enum x86_segment seg,
 
     switch ( seg )
     {
-    case x86_seg_cs:
-        *reg = vmcb->cs;
-        break;
-    case x86_seg_ds:
-        *reg = vmcb->ds;
-        break;
-    case x86_seg_es:
-        *reg = vmcb->es;
-        break;
-    case x86_seg_fs:
+    case x86_seg_fs ... x86_seg_gs:
         svm_sync_vmcb(v);
-        *reg = vmcb->fs;
+
+        /* Fallthrough. */
+    case x86_seg_es ... x86_seg_ds:
+        *reg = vmcb->sreg[seg];
+
+        if ( seg == x86_seg_ss )
+            reg->dpl = vmcb_get_cpl(vmcb);
         break;
-    case x86_seg_gs:
-        svm_sync_vmcb(v);
-        *reg = vmcb->gs;
-        break;
-    case x86_seg_ss:
-        *reg = vmcb->ss;
-        reg->attr.fields.dpl = vmcb->_cpl;
-        break;
+
     case x86_seg_tr:
         svm_sync_vmcb(v);
         *reg = vmcb->tr;
         break;
+
     case x86_seg_gdtr:
         *reg = vmcb->gdtr;
         break;
+
     case x86_seg_idtr:
         *reg = vmcb->idtr;
         break;
+
     case x86_seg_ldtr:
         svm_sync_vmcb(v);
         *reg = vmcb->ldtr;
         break;
+
     default:
-        BUG();
+        ASSERT_UNREACHABLE();
+        domain_crash(v->domain);
+        *reg = (struct segment_register){};
     }
 }
 
@@ -678,7 +694,7 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
                                      struct segment_register *reg)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    int sync = 0;
+    bool sync = false;
 
     ASSERT((v == current) || !vcpu_runnable(v));
 
@@ -690,18 +706,23 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
     case x86_seg_ss: /* cpl */
         vmcb->cleanbits.fields.seg = 0;
         break;
+
     case x86_seg_gdtr:
     case x86_seg_idtr:
         vmcb->cleanbits.fields.dt = 0;
         break;
+
     case x86_seg_fs:
     case x86_seg_gs:
     case x86_seg_tr:
     case x86_seg_ldtr:
         sync = (v == current);
         break;
+
     default:
-        break;
+        ASSERT_UNREACHABLE();
+        domain_crash(v->domain);
+        return;
     }
 
     if ( sync )
@@ -709,41 +730,36 @@ static void svm_set_segment_register(struct vcpu *v, enum x86_segment seg,
 
     switch ( seg )
     {
-    case x86_seg_cs:
-        vmcb->cs = *reg;
-        break;
-    case x86_seg_ds:
-        vmcb->ds = *reg;
-        break;
-    case x86_seg_es:
-        vmcb->es = *reg;
-        break;
-    case x86_seg_fs:
-        vmcb->fs = *reg;
-        break;
-    case x86_seg_gs:
-        vmcb->gs = *reg;
-        break;
     case x86_seg_ss:
-        vmcb->ss = *reg;
-        vmcb->_cpl = vmcb->ss.attr.fields.dpl;
+        vmcb_set_cpl(vmcb, reg->dpl);
+
+        /* Fallthrough */
+    case x86_seg_es ... x86_seg_cs:
+    case x86_seg_ds ... x86_seg_gs:
+        vmcb->sreg[seg] = *reg;
         break;
+
     case x86_seg_tr:
         vmcb->tr = *reg;
         break;
+
     case x86_seg_gdtr:
         vmcb->gdtr.base = reg->base;
         vmcb->gdtr.limit = reg->limit;
         break;
+
     case x86_seg_idtr:
         vmcb->idtr.base = reg->base;
         vmcb->idtr.limit = reg->limit;
         break;
+
     case x86_seg_ldtr:
         vmcb->ldtr = *reg;
         break;
-    default:
-        BUG();
+
+    case x86_seg_none:
+        ASSERT_UNREACHABLE();
+        break;
     }
 
     if ( sync )
@@ -1019,7 +1035,7 @@ static void svm_ctxt_switch_from(struct vcpu *v)
     svm_tsc_ratio_save(v);
 
     svm_sync_vmcb(v);
-    svm_vmload(per_cpu(root_vmcb, cpu));
+    svm_vmload_pa(per_cpu(host_vmcb, cpu));
 
     /* Resume use of ISTs now that the host TR is reinstated. */
     set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
@@ -1049,7 +1065,7 @@ static void svm_ctxt_switch_to(struct vcpu *v)
 
     svm_restore_dr(v);
 
-    svm_vmsave(per_cpu(root_vmcb, cpu));
+    svm_vmsave_pa(per_cpu(host_vmcb, cpu));
     svm_vmload(vmcb);
     vmcb->cleanbits.bytes = 0;
     svm_lwp_load(v);
@@ -1268,7 +1284,7 @@ static void svm_emul_swint_injection(struct x86_event *event)
                                     PFEC_implicit, &pfinfo);
     if ( rc )
     {
-        if ( rc == HVMCOPY_bad_gva_to_gfn )
+        if ( rc == HVMTRANS_bad_linear_to_gfn )
         {
             fault = TRAP_page_fault;
             ec = pfinfo.ec;
@@ -1442,7 +1458,7 @@ static void svm_inject_event(const struct x86_event *event)
      * If injecting an event outside of 64bit mode, zero the upper bits of the
      * %eip and nextrip after the adjustments above.
      */
-    if ( !((vmcb->_efer & EFER_LMA) && vmcb->cs.attr.fields.l) )
+    if ( !((vmcb_get_efer(vmcb) & EFER_LMA) && vmcb->cs.l) )
     {
         regs->rip = regs->eip;
         vmcb->nextrip = (uint32_t)vmcb->nextrip;
@@ -1472,24 +1488,58 @@ static int svm_event_pending(struct vcpu *v)
 
 static void svm_cpu_dead(unsigned int cpu)
 {
-    free_xenheap_page(per_cpu(hsa, cpu));
-    per_cpu(hsa, cpu) = NULL;
-    free_vmcb(per_cpu(root_vmcb, cpu));
-    per_cpu(root_vmcb, cpu) = NULL;
+    paddr_t *this_hsa = &per_cpu(hsa, cpu);
+    paddr_t *this_vmcb = &per_cpu(host_vmcb, cpu);
+
+    if ( *this_hsa )
+    {
+        free_domheap_page(maddr_to_page(*this_hsa));
+        *this_hsa = 0;
+    }
+
+    if ( *this_vmcb )
+    {
+        free_domheap_page(maddr_to_page(*this_vmcb));
+        *this_vmcb = 0;
+    }
 }
 
 static int svm_cpu_up_prepare(unsigned int cpu)
 {
-    if ( ((per_cpu(hsa, cpu) == NULL) &&
-          ((per_cpu(hsa, cpu) = alloc_host_save_area()) == NULL)) ||
-         ((per_cpu(root_vmcb, cpu) == NULL) &&
-          ((per_cpu(root_vmcb, cpu) = alloc_vmcb()) == NULL)) )
+    paddr_t *this_hsa = &per_cpu(hsa, cpu);
+    paddr_t *this_vmcb = &per_cpu(host_vmcb, cpu);
+    nodeid_t node = cpu_to_node(cpu);
+    unsigned int memflags = 0;
+    struct page_info *pg;
+
+    if ( node != NUMA_NO_NODE )
+        memflags = MEMF_node(node);
+
+    if ( !*this_hsa )
     {
-        svm_cpu_dead(cpu);
-        return -ENOMEM;
+        pg = alloc_domheap_page(NULL, memflags);
+        if ( !pg )
+            goto err;
+
+        clear_domain_page(_mfn(page_to_mfn(pg)));
+        *this_hsa = page_to_maddr(pg);
+    }
+
+    if ( !*this_vmcb )
+    {
+        pg = alloc_domheap_page(NULL, memflags);
+        if ( !pg )
+            goto err;
+
+        clear_domain_page(_mfn(page_to_mfn(pg)));
+        *this_vmcb = page_to_maddr(pg);
     }
 
     return 0;
+
+ err:
+    svm_cpu_dead(cpu);
+    return -ENOMEM;
 }
 
 static void svm_init_erratum_383(const struct cpuinfo_x86 *c)
@@ -1542,13 +1592,13 @@ static int _svm_cpu_up(bool bsp)
         return -EINVAL;
     }
 
-    if ( (rc = svm_cpu_up_prepare(cpu)) != 0 )
+    if ( bsp && (rc = svm_cpu_up_prepare(cpu)) != 0 )
         return rc;
 
     write_efer(read_efer() | EFER_SVME);
 
     /* Initialize the HSA for this core. */
-    wrmsrl(MSR_K8_VM_HSAVE_PA, (uint64_t)virt_to_maddr(per_cpu(hsa, cpu)));
+    wrmsrl(MSR_K8_VM_HSAVE_PA, per_cpu(hsa, cpu));
 
     /* check for erratum 383 */
     svm_init_erratum_383(c);

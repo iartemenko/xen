@@ -19,10 +19,10 @@
 #define BITS_PER_LONG (BYTES_PER_LONG << 3)
 #define POINTER_ALIGN BYTES_PER_LONG
 
+#define BITS_PER_LLONG 64
+
 /* xen_ulong_t is always 64 bits */
 #define BITS_PER_XEN_ULONG 64
-
-#define CONFIG_PAGING_ASSISTANCE 1
 
 #define CONFIG_PAGING_LEVELS 3
 
@@ -47,8 +47,6 @@
 #endif
 
 #define INVALID_VCPU_ID MAX_VIRT_CPUS
-
-#define asmlinkage /* Nothing needed */
 
 #define __LINUX_ARM_ARCH__ 7
 #define CONFIG_AEABI

@@ -48,7 +48,7 @@ static int gdbsx_guest_mem_io(domid_t domid, struct xen_domctl_gdbsx_memio *iop)
 }
 
 static int update_domain_cpuid_info(struct domain *d,
-                                    const xen_domctl_cpuid_t *ctl)
+                                    const struct xen_domctl_cpuid *ctl)
 {
     struct cpuid_policy *p = d->arch.cpuid;
     const struct cpuid_leaf leaf = { ctl->eax, ctl->ebx, ctl->ecx, ctl->edx };
@@ -302,6 +302,44 @@ static int update_domain_cpuid_info(struct domain *d,
     return 0;
 }
 
+static int vcpu_set_vmce(struct vcpu *v,
+                         const struct xen_domctl_ext_vcpucontext *evc)
+{
+    /*
+     * Sizes of vMCE parameters used by the current and past versions
+     * of Xen in descending order. If vMCE parameters are extended,
+     * remember to add the old size to this array by VMCE_SIZE().
+     */
+#define VMCE_SIZE(field) \
+    (offsetof(typeof(evc->vmce), field) + sizeof(evc->vmce.field))
+
+    static const unsigned int valid_sizes[] = {
+        sizeof(evc->vmce),
+        VMCE_SIZE(mci_ctl2_bank1),
+        VMCE_SIZE(caps),
+    };
+#undef VMCE_SIZE
+
+    struct hvm_vmce_vcpu vmce = { };
+    unsigned int evc_vmce_size =
+        min(evc->size - offsetof(typeof(*evc), vmce), sizeof(evc->vmce));
+    unsigned int i = 0;
+
+    BUILD_BUG_ON(offsetof(typeof(*evc), mcg_cap) !=
+                 offsetof(typeof(*evc), vmce.caps));
+    BUILD_BUG_ON(sizeof(evc->mcg_cap) != sizeof(evc->vmce.caps));
+
+    while ( i < ARRAY_SIZE(valid_sizes) && evc_vmce_size < valid_sizes[i] )
+        ++i;
+
+    if ( i == ARRAY_SIZE(valid_sizes) )
+        return 0;
+
+    memcpy(&vmce, &evc->vmce, valid_sizes[i]);
+
+    return vmce_restore_vcpu(v, &vmce);
+}
+
 void arch_get_domain_info(const struct domain *d,
                           struct xen_domctl_getdomaininfo *info)
 {
@@ -318,19 +356,18 @@ long arch_do_domctl(
     struct vcpu *curr = current;
     struct domain *currd = curr->domain;
     long ret = 0;
-    bool_t copyback = 0;
+    bool copyback = false;
     unsigned long i;
 
     switch ( domctl->cmd )
     {
 
     case XEN_DOMCTL_shadow_op:
-        ret = paging_domctl(d, &domctl->u.shadow_op,
-                            guest_handle_cast(u_domctl, void), 0);
+        ret = paging_domctl(d, &domctl->u.shadow_op, u_domctl, 0);
         if ( ret == -ERESTART )
             return hypercall_create_continuation(__HYPERVISOR_arch_1,
                                                  "h", u_domctl);
-        copyback = 1;
+        copyback = true;
         break;
 
     case XEN_DOMCTL_ioport_permission:
@@ -405,7 +442,7 @@ long arch_do_domctl(
         spin_unlock(&d->page_alloc_lock);
 
         domctl->u.getmemlist.num_pfns = i;
-        copyback = 1;
+        copyback = true;
         break;
     }
 
@@ -576,7 +613,7 @@ long arch_do_domctl(
             ret = -EFAULT;
 
     gethvmcontext_out:
-        copyback = 1;
+        copyback = true;
         xfree(c.data);
         break;
     }
@@ -590,8 +627,12 @@ long arch_do_domctl(
         domain_pause(d);
         ret = hvm_save_one(d, domctl->u.hvmcontext_partial.type,
                            domctl->u.hvmcontext_partial.instance,
-                           domctl->u.hvmcontext_partial.buffer);
+                           domctl->u.hvmcontext_partial.buffer,
+                           &domctl->u.hvmcontext_partial.bufsz);
         domain_unpause(d);
+
+        if ( !ret )
+            copyback = true;
         break;
 
     case XEN_DOMCTL_set_address_size:
@@ -607,7 +648,7 @@ long arch_do_domctl(
     case XEN_DOMCTL_get_address_size:
         domctl->u.address_size.size = is_pv_32bit_domain(d) ? 32 :
                                                               BITS_PER_LONG;
-        copyback = 1;
+        copyback = true;
         break;
 
     case XEN_DOMCTL_set_machine_address_size:
@@ -619,7 +660,7 @@ long arch_do_domctl(
 
     case XEN_DOMCTL_get_machine_address_size:
         domctl->u.address_size.size = d->arch.physaddr_bitsize;
-        copyback = 1;
+        copyback = true;
         break;
 
     case XEN_DOMCTL_sendtrigger:
@@ -665,7 +706,7 @@ long arch_do_domctl(
 
     case XEN_DOMCTL_bind_pt_irq:
     {
-        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
+        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
         int irq;
 
         ret = -EINVAL;
@@ -696,7 +737,7 @@ long arch_do_domctl(
 
     case XEN_DOMCTL_unbind_pt_irq:
     {
-        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
+        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
         int irq = domain_pirq_to_irq(d, bind->machine_irq);
 
         ret = -EPERM;
@@ -867,10 +908,11 @@ long arch_do_domctl(
             evc->vmce.caps = v->arch.vmce.mcg_cap;
             evc->vmce.mci_ctl2_bank0 = v->arch.vmce.bank[0].mci_ctl2;
             evc->vmce.mci_ctl2_bank1 = v->arch.vmce.bank[1].mci_ctl2;
+            evc->vmce.mcg_ext_ctl = v->arch.vmce.mcg_ext_ctl;
 
             ret = 0;
             vcpu_unpause(v);
-            copyback = 1;
+            copyback = true;
         }
         else
         {
@@ -908,23 +950,7 @@ long arch_do_domctl(
             else
                 domain_pause(d);
 
-            BUILD_BUG_ON(offsetof(struct xen_domctl_ext_vcpucontext,
-                                  mcg_cap) !=
-                         offsetof(struct xen_domctl_ext_vcpucontext,
-                                  vmce.caps));
-            BUILD_BUG_ON(sizeof(evc->mcg_cap) != sizeof(evc->vmce.caps));
-            if ( evc->size >= offsetof(typeof(*evc), vmce) +
-                              sizeof(evc->vmce) )
-                ret = vmce_restore_vcpu(v, &evc->vmce);
-            else if ( evc->size >= offsetof(typeof(*evc), mcg_cap) +
-                                   sizeof(evc->mcg_cap) )
-            {
-                struct hvm_vmce_vcpu vmce = { .caps = evc->mcg_cap };
-
-                ret = vmce_restore_vcpu(v, &vmce);
-            }
-            else
-                ret = 0;
+            ret = vcpu_set_vmce(v, evc);
 
             domain_unpause(d);
         }
@@ -955,7 +981,7 @@ long arch_do_domctl(
                          &domctl->u.tsc_info.gtsc_khz,
                          &domctl->u.tsc_info.incarnation);
             domain_unpause(d);
-            copyback = 1;
+            copyback = true;
         }
         break;
 
@@ -999,7 +1025,7 @@ long arch_do_domctl(
         domctl->u.gdbsx_guest_memio.remain = domctl->u.gdbsx_guest_memio.len;
         ret = gdbsx_guest_mem_io(domctl->domain, &domctl->u.gdbsx_guest_memio);
         if ( !ret )
-           copyback = 1;
+           copyback = true;
         break;
 
     case XEN_DOMCTL_gdbsx_pausevcpu:
@@ -1056,7 +1082,7 @@ long arch_do_domctl(
                 }
             }
         }
-        copyback = 1;
+        copyback = true;
         break;
     }
 
@@ -1216,7 +1242,7 @@ long arch_do_domctl(
 
     vcpuextstate_out:
         if ( domctl->cmd == XEN_DOMCTL_getvcpuextstate )
-            copyback = 1;
+            copyback = true;
         break;
     }
 
@@ -1234,7 +1260,7 @@ long arch_do_domctl(
                       &domctl->u.audit_p2m.orphans,
                       &domctl->u.audit_p2m.m2p_bad,
                       &domctl->u.audit_p2m.p2m_bad);
-            copyback = 1;
+            copyback = true;
         }
         break;
 #endif /* P2M_AUDIT */
@@ -1278,7 +1304,7 @@ long arch_do_domctl(
 
         if ( domctl->cmd == XEN_DOMCTL_get_vcpu_msrs )
         {
-            ret = 0; copyback = 1;
+            ret = 0; copyback = true;
 
             /* NULL guest handle is a request for max size. */
             if ( guest_handle_is_null(vmsrs->msrs) )
@@ -1375,7 +1401,7 @@ long arch_do_domctl(
             else
             {
                 vmsrs->msr_count = i;
-                copyback = 1;
+                copyback = true;
             }
         }
         break;
@@ -1403,7 +1429,7 @@ long arch_do_domctl(
 
         case XEN_DOMCTL_PSR_CMT_OP_QUERY_RMID:
             domctl->u.psr_cmt_op.data = d->arch.psr_rmid;
-            copyback = 1;
+            copyback = true;
             break;
 
         default:
@@ -1415,43 +1441,58 @@ long arch_do_domctl(
     case XEN_DOMCTL_psr_cat_op:
         switch ( domctl->u.psr_cat_op.cmd )
         {
+            uint32_t val32;
+
         case XEN_DOMCTL_PSR_CAT_OP_SET_L3_CBM:
-            ret = psr_set_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3);
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3);
             break;
 
         case XEN_DOMCTL_PSR_CAT_OP_SET_L3_CODE:
-            ret = psr_set_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3_CODE);
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3_CODE);
             break;
 
         case XEN_DOMCTL_PSR_CAT_OP_SET_L3_DATA:
-            ret = psr_set_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3_DATA);
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3_DATA);
+            break;
+
+        case XEN_DOMCTL_PSR_CAT_OP_SET_L2_CBM:
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L2);
             break;
 
         case XEN_DOMCTL_PSR_CAT_OP_GET_L3_CBM:
-            ret = psr_get_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 &domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3);
-            copyback = 1;
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
         case XEN_DOMCTL_PSR_CAT_OP_GET_L3_CODE:
-            ret = psr_get_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 &domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3_CODE);
-            copyback = 1;
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3_CODE);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
         case XEN_DOMCTL_PSR_CAT_OP_GET_L3_DATA:
-            ret = psr_get_l3_cbm(d, domctl->u.psr_cat_op.target,
-                                 &domctl->u.psr_cat_op.data,
-                                 PSR_CBM_TYPE_L3_DATA);
-            copyback = 1;
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3_DATA);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
+            break;
+
+        case XEN_DOMCTL_PSR_CAT_OP_GET_L2_CBM:
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L2);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
         default:
@@ -1486,7 +1527,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 {
     unsigned int i;
     const struct domain *d = v->domain;
-    bool_t compat = is_pv_32bit_domain(d);
+    bool compat = is_pv_32bit_domain(d);
 #define c(fld) (!compat ? (c.nat->fld) : (c.cmp->fld))
 
     if ( !is_pv_domain(d) )

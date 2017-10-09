@@ -49,14 +49,12 @@ void copy_from_paddr(void *dst, paddr_t paddr, unsigned long len)
     void *src = (void *)FIXMAP_ADDR(FIXMAP_MISC);
 
     while (len) {
-        paddr_t p;
         unsigned long l, s;
 
-        p = paddr >> PAGE_SHIFT;
         s = paddr & (PAGE_SIZE-1);
         l = min(PAGE_SIZE - s, len);
 
-        set_fixmap(FIXMAP_MISC, p, BUFFERABLE);
+        set_fixmap(FIXMAP_MISC, maddr_to_mfn(paddr), MT_BUFFERABLE);
         memcpy(dst, src + s, l);
         clean_dcache_va_range(dst, l);
 
@@ -183,7 +181,7 @@ static void kernel_zimage_load(struct kernel_info *info)
             return;
         }
 
-        dst = map_domain_page(_mfn(paddr_to_pfn(ma)));
+        dst = map_domain_page(maddr_to_mfn(ma));
 
         copy_from_paddr(dst + s, paddr + offs, l);
 
@@ -312,7 +310,7 @@ static __init int kernel_decompress(struct bootmodule *mod)
      * Need to free pages after output_size here because they won't be
      * freed by discard_initial_modules
      */
-    i = DIV_ROUND_UP(output_size, PAGE_SIZE);
+    i = PFN_UP(output_size);
     for ( ; i < (1 << kernel_order_out); i++ )
         free_domheap_page(pages + i);
 

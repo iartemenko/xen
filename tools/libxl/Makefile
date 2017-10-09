@@ -5,10 +5,10 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-MAJOR = 4.9
+MAJOR = 4.10
 MINOR = 0
 
-XLUMAJOR = 4.9
+XLUMAJOR = 4.10
 XLUMINOR = 0
 
 CFLAGS += -Werror -Wno-format-zero-length -Wmissing-declarations \
@@ -46,7 +46,7 @@ LIBXL_LIBS += $(LIBXL_LIBS-y)
 LIBXLU_LIBS = $(LDLIBS_libxenlight)
 
 LIBXL_OBJS-y = osdeps.o libxl_paths.o libxl_bootloader.o flexarray.o
-ifeq ($(LIBXL_BLKTAP),y)
+ifeq ($(CONFIG_BLKTAP2),y)
 LIBXL_OBJS-y += libxl_blktap2.o
 else
 LIBXL_OBJS-y += libxl_noblktap2.o
@@ -138,7 +138,7 @@ LIBXL_OBJS = flexarray.o libxl.o libxl_create.o libxl_dm.o libxl_pci.o \
 			libxl_dom_suspend.o libxl_dom_save.o libxl_usb.o \
 			libxl_vtpm.o libxl_nic.o libxl_disk.o libxl_console.o \
 			libxl_cpupool.o libxl_mem.o libxl_sched.o libxl_tmem.o \
-			libxl_9pfs.o libxl_domain.o \
+			libxl_9pfs.o libxl_domain.o libxl_vdispl.o \
                         $(LIBXL_OBJS-y)
 LIBXL_OBJS += libxl_genid.o
 LIBXL_OBJS += _libxl_types.o libxl_flask.o _libxl_types_internal.o
@@ -327,9 +327,23 @@ install: all
 	$(INSTALL_DATA) xenlight.pc $(DESTDIR)$(PKG_INSTALLDIR)
 	$(INSTALL_DATA) xlutil.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(PKG_INSTALLDIR)/,xlutil.pc xenlight.pc)
+	rm -f $(addprefix $(DESTDIR)$(includedir)/,libxl.h libxl_event.h libxl_json.h _libxl_types.h _libxl_types_json.h _libxl_list.h libxl_utils.h libxl_uuid.h libxlutil.h)
+	rm -f $(DESTDIR)$(libdir)/libxlutil.a
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so.$(XLUMAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxlutil.so.$(XLUMAJOR).$(XLUMINOR)
+	rm -f $(DESTDIR)$(libdir)/libxenlight.a
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxenlight.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/libxl-save-helper
+
 .PHONY: clean
 clean:
-	$(RM) -f _*.h *.o *.so* *.a $(CLIENTS) $(DEPS)
+	$(RM) -f _*.h *.o *.so* *.a $(CLIENTS) $(DEPS_RM)
 	$(RM) -f _*.c *.pyc _paths.*.tmp _*.api-for-check
 	$(RM) -f testidl.c.new testidl.c *.api-ok
 	$(RM) -f xenlight.pc
@@ -341,4 +355,4 @@ distclean: clean
 realclean: distclean
 	$(RM) -f $(AUTOSRCS) $(AUTOINCS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

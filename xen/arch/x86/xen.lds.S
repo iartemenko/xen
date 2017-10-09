@@ -90,6 +90,8 @@ SECTIONS
 
        *(.rodata)
        *(.rodata.*)
+       *(.data.rel.ro)
+       *(.data.rel.ro.*)
 
 #if defined(BUILD_ID) && defined(EFI) && !defined(BUILD_ID_EFI)
 /*
@@ -118,6 +120,10 @@ SECTIONS
        *(.lockprofile.data)
        __lock_profile_end = .;
 #endif
+       . = ALIGN(POINTER_ALIGN);
+       __param_start = .;
+       *(.data.param)
+       __param_end = .;
   } :text
 
 #if defined(BUILD_ID)
@@ -153,7 +159,7 @@ SECTIONS
   __2M_init_start = .;         /* Start of 2M superpages, mapped RWX (boot only). */
   . = ALIGN(PAGE_SIZE);             /* Init code and data */
   __init_begin = .;
-  .init.text : {
+  .init : {
        _sinittext = .;
        *(.init.text)
        /*
@@ -163,8 +169,9 @@ SECTIONS
         */
        *(.altinstr_replacement)
        _einittext = .;
-  } :text
-  .init.data : {
+
+       . = ALIGN(SMP_CACHE_BYTES);
+
        *(.init.rodata)
        *(.init.rodata.rel)
        *(.init.rodata.str*)
@@ -224,8 +231,6 @@ SECTIONS
        __start_schedulers_array = .;
        *(.data.schedulers)
        __end_schedulers_array = .;
-       *(.data.rel.ro)
-       *(.data.rel.ro.*)
   } :text
 
   .data : {                    /* Data */

@@ -75,13 +75,22 @@ install: build
 	$(INSTALL_DATA) include/xencall.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) xencall.pc $(DESTDIR)$(PKG_INSTALLDIR)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xencall.pc
+	rm -f $(DESTDIR)$(includedir)/xencall.h
+	rm -f $(DESTDIR)$(libdir)/libxencall.so
+	rm -f $(DESTDIR)$(libdir)/libxencall.so.$(MAJOR)
+	rm -f $(DESTDIR)$(libdir)/libxencall.so.$(MAJOR).$(MINOR)
+	rm -f $(DESTDIR)$(libdir)/libxencall.a
+
 .PHONY: TAGS
 TAGS:
 	etags -t *.c *.h
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS) $(LIB_OBJS) $(PIC_OBJS)
+	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) $(LIB_OBJS) $(PIC_OBJS)
 	rm -f libxencall.so.$(MAJOR).$(MINOR) libxencall.so.$(MAJOR)
 	rm -f headers.chk
 	rm -f xencall.pc

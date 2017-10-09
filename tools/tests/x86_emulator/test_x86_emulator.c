@@ -264,7 +264,7 @@ static int read_segment(
     if ( !is_x86_user_segment(seg) )
         return X86EMUL_UNHANDLEABLE;
     memset(reg, 0, sizeof(*reg));
-    reg->attr.fields.p = 1;
+    reg->p = 1;
     return X86EMUL_OKAY;
 }
 
@@ -782,6 +782,31 @@ int main(int argc, char **argv)
         goto fail;
     printf("okay\n");
 #endif
+
+    printf("%-40s", "Testing shld $1,%ecx,(%edx)...");
+    res[0]      = 0x12345678;
+    regs.edx    = (unsigned long)res;
+    regs.ecx    = 0x9abcdef0;
+    instr[0] = 0x0f; instr[1] = 0xa4; instr[2] = 0x0a; instr[3] = 0x01;
+    for ( i = 0; i < 0x20; ++i )
+    {
+        uint32_t r = res[0];
+        const uint32_t m = X86_EFLAGS_ARITH_MASK & ~X86_EFLAGS_AF;
+        unsigned long f;
+
+        asm ( "shld $1,%2,%0; pushf; pop %1"
+              : "+rm" (r), "=rm" (f) : "r" ((uint32_t)regs.ecx) );
+        regs.eflags = f ^ m;
+        regs.eip    = (unsigned long)&instr[0];
+        rc = x86_emulate(&ctxt, &emulops);
+        if ( (rc != X86EMUL_OKAY) ||
+             (regs.eip != (unsigned long)&instr[4]) ||
+             (res[0] != r) ||
+             ((regs.eflags ^ f) & m) )
+            goto fail;
+        regs.ecx <<= 1;
+    }
+    printf("okay\n");
 
     printf("%-40s", "Testing movbe (%ecx),%eax...");
     instr[0] = 0x0f; instr[1] = 0x38; instr[2] = 0xf0; instr[3] = 0x01;
@@ -2994,14 +3019,14 @@ int main(int argc, char **argv)
 
     for ( j = 0; j < ARRAY_SIZE(blobs); j++ )
     {
+        if ( blobs[j].check_cpu && !blobs[j].check_cpu() )
+            continue;
+
         if ( !blobs[j].size )
         {
             printf("%-39s n/a\n", blobs[j].name);
             continue;
         }
-
-        if ( blobs[j].check_cpu && !blobs[j].check_cpu() )
-            continue;
 
         memcpy(res, blobs[j].code, blobs[j].size);
         ctxt.lma = blobs[j].bitness == 64;

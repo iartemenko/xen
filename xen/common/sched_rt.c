@@ -171,11 +171,14 @@ static void repl_timer_handler(void *data);
 struct rt_private {
     spinlock_t lock;            /* the global coarse-grained lock */
     struct list_head sdom;      /* list of availalbe domains, used for dump */
+
     struct list_head runq;      /* ordered list of runnable vcpus */
     struct list_head depletedq; /* unordered list of depleted vcpus */
-    struct list_head replq;     /* ordered list of vcpus that need replenishment */
-    cpumask_t tickled;          /* cpus been tickled */
+
     struct timer *repl_timer;   /* replenishment timer */
+    struct list_head replq;     /* ordered list of vcpus that need replenishment */
+
+    cpumask_t tickled;          /* cpus been tickled */
 };
 
 /*
@@ -185,10 +188,6 @@ struct rt_vcpu {
     struct list_head q_elem;     /* on the runq/depletedq list */
     struct list_head replq_elem; /* on the replenishment events list */
 
-    /* Up-pointers */
-    struct rt_dom *sdom;
-    struct vcpu *vcpu;
-
     /* VCPU parameters, in nanoseconds */
     s_time_t period;
     s_time_t budget;
@@ -197,6 +196,10 @@ struct rt_vcpu {
     s_time_t cur_budget;         /* current budget */
     s_time_t last_start;         /* last start time */
     s_time_t cur_deadline;       /* current deadline for EDF */
+
+    /* Up-pointers */
+    struct rt_dom *sdom;
+    struct vcpu *vcpu;
 
     unsigned flags;              /* mark __RTDS_scheduled, etc.. */
 };
@@ -1144,9 +1147,9 @@ rt_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
  * Called by wake() and context_saved()
  * We have a running candidate here, the kick logic is:
  * Among all the cpus that are within the cpu affinity
- * 1) if the new->cpu is idle, kick it. This could benefit cache hit
- * 2) if there are any idle vcpu, kick it.
- * 3) now all pcpus are busy;
+ * 1) if there are any idle CPUs, kick one.
+      For cache benefit, we check new->cpu as first
+ * 2) now all pcpus are busy;
  *    among all the running vcpus, pick lowest priority one
  *    if snext has higher priority, kick it.
  *
@@ -1174,17 +1177,13 @@ runq_tickle(const struct scheduler *ops, struct rt_vcpu *new)
     cpumask_and(&not_tickled, online, new->vcpu->cpu_hard_affinity);
     cpumask_andnot(&not_tickled, &not_tickled, &prv->tickled);
 
-    /* 1) if new's previous cpu is idle, kick it for cache benefit */
-    if ( is_idle_vcpu(curr_on_cpu(new->vcpu->processor)) )
-    {
-        SCHED_STAT_CRANK(tickled_idle_cpu);
-        cpu_to_tickle = new->vcpu->processor;
-        goto out;
-    }
-
-    /* 2) if there are any idle pcpu, kick it */
-    /* The same loop also find the one with lowest priority */
-    for_each_cpu(cpu, &not_tickled)
+    /*
+     * 1) If there are any idle CPUs, kick one.
+     *    For cache benefit,we first search new->cpu.
+     *    The same loop also find the one with lowest priority.
+     */
+    cpu = cpumask_test_or_cycle(new->vcpu->processor, &not_tickled);
+    while ( cpu!= nr_cpu_ids )
     {
         iter_vc = curr_on_cpu(cpu);
         if ( is_idle_vcpu(iter_vc) )
@@ -1197,9 +1196,12 @@ runq_tickle(const struct scheduler *ops, struct rt_vcpu *new)
         if ( latest_deadline_vcpu == NULL ||
              iter_svc->cur_deadline > latest_deadline_vcpu->cur_deadline )
             latest_deadline_vcpu = iter_svc;
+
+        cpumask_clear_cpu(cpu, &not_tickled);
+        cpu = cpumask_cycle(cpu, &not_tickled);
     }
 
-    /* 3) candicate has higher priority, kick out lowest priority vcpu */
+    /* 2) candicate has higher priority, kick out lowest priority vcpu */
     if ( latest_deadline_vcpu != NULL &&
          new->cur_deadline < latest_deadline_vcpu->cur_deadline )
     {
@@ -1343,7 +1345,7 @@ rt_dom_cntl(
     struct vcpu *v;
     unsigned long flags;
     int rc = 0;
-    xen_domctl_schedparam_vcpu_t local_sched;
+    struct xen_domctl_schedparam_vcpu local_sched;
     s_time_t period, budget;
     uint32_t index = 0;
 

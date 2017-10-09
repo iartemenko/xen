@@ -33,9 +33,11 @@ int dom0_11_mapping = 1;
 
 static u64 __initdata dom0_mem;
 
-static void __init parse_dom0_mem(const char *s)
+static int __init parse_dom0_mem(const char *s)
 {
     dom0_mem = parse_size_and_unit(s, &s);
+
+    return *s ? -EINVAL : 0;
 }
 custom_param("dom0_mem", parse_dom0_mem);
 
@@ -44,6 +46,10 @@ struct map_range_data
     struct domain *d;
     p2m_type_t p2mt;
 };
+
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef virt_to_mfn
+#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 //#define DEBUG_11_ALLOCATION
 #ifdef DEBUG_11_ALLOCATION
@@ -92,10 +98,10 @@ static unsigned int get_11_allocation_size(paddr_t size)
  * Returns false if the memory would be below bank 0 or we have run
  * out of banks. In this case it will free the pages.
  */
-static bool_t insert_11_bank(struct domain *d,
-                             struct kernel_info *kinfo,
-                             struct page_info *pg,
-                             unsigned int order)
+static bool insert_11_bank(struct domain *d,
+                           struct kernel_info *kinfo,
+                           struct page_info *pg,
+                           unsigned int order)
 {
     int res, i;
     paddr_t spfn;
@@ -248,7 +254,7 @@ static void allocate_memory(struct domain *d, struct kernel_info *kinfo)
     unsigned int order = get_11_allocation_size(kinfo->unassigned_mem);
     int i;
 
-    bool_t lowmem = true;
+    bool lowmem = true;
     unsigned int bits;
 
     /*
@@ -672,7 +678,7 @@ static int make_cpus_node(const struct domain *d, void *fdt,
     /* Placeholder for cpu@ + a 32-bit number + \0 */
     char buf[15];
     u32 clock_frequency;
-    bool_t clock_valid;
+    bool clock_valid;
     uint64_t mpidr_aff;
 
     dt_dprintk("Create cpus node\n");
@@ -750,7 +756,8 @@ static int make_cpus_node(const struct domain *d, void *fdt,
         if ( res )
             return res;
 
-        if (clock_valid) {
+        if ( clock_valid )
+        {
             res = fdt_property_cell(fdt, "clock-frequency", clock_frequency);
             if ( res )
                 return res;
@@ -858,7 +865,7 @@ static int make_timer_node(const struct domain *d, void *fdt,
     unsigned int irq;
     gic_interrupt_t intrs[3];
     u32 clock_frequency;
-    bool_t clock_valid;
+    bool clock_valid;
 
     dt_dprintk("Create timer node\n");
 
@@ -918,7 +925,7 @@ static int make_timer_node(const struct domain *d, void *fdt,
 }
 
 static int map_irq_to_domain(struct domain *d, unsigned int irq,
-                             bool_t need_mapping, const char *devname)
+                             bool need_mapping, const char *devname)
 
 {
     int res;
@@ -960,7 +967,7 @@ static int map_dt_irq_to_domain(const struct dt_device_node *dev,
     struct domain *d = data;
     unsigned int irq = dt_irq->irq;
     int res;
-    bool_t need_mapping = !dt_device_for_passthrough(dev);
+    bool need_mapping = !dt_device_for_passthrough(dev);
 
     if ( irq < NR_LOCAL_IRQS )
     {
@@ -990,7 +997,7 @@ static int map_range_to_domain(const struct dt_device_node *dev,
 {
     struct map_range_data *mr_data = data;
     struct domain *d = mr_data->d;
-    bool_t need_mapping = !dt_device_for_passthrough(dev);
+    bool need_mapping = !dt_device_for_passthrough(dev);
     int res;
 
     res = iomem_permit_access(d, paddr_to_pfn(addr),
@@ -1007,9 +1014,9 @@ static int map_range_to_domain(const struct dt_device_node *dev,
     if ( need_mapping )
     {
         res = map_regions_p2mt(d,
-                               _gfn(paddr_to_pfn(addr)),
-                               DIV_ROUND_UP(len, PAGE_SIZE),
-                               _mfn(paddr_to_pfn(addr)),
+                               gaddr_to_gfn(addr),
+                               PFN_UP(len),
+                               maddr_to_mfn(addr),
                                mr_data->p2mt);
 
         if ( res < 0 )
@@ -1074,7 +1081,7 @@ static int handle_device(struct domain *d, struct dt_device_node *dev,
     int res;
     struct dt_raw_irq rirq;
     u64 addr, size;
-    bool_t need_mapping = !dt_device_for_passthrough(dev);
+    bool need_mapping = !dt_device_for_passthrough(dev);
 
     nirq = dt_number_of_irq(dev);
     naddr = dt_number_of_address(dev);
@@ -1544,9 +1551,9 @@ static void acpi_map_other_tables(struct domain *d)
         addr = acpi_gbl_root_table_list.tables[i].address;
         size = acpi_gbl_root_table_list.tables[i].length;
         res = map_regions_p2mt(d,
-                               _gfn(paddr_to_pfn(addr)),
-                               DIV_ROUND_UP(size, PAGE_SIZE),
-                               _mfn(paddr_to_pfn(addr)),
+                               gaddr_to_gfn(addr),
+                               PFN_UP(size),
+                               maddr_to_mfn(addr),
                                p2m_mmio_direct_c);
         if ( res )
         {
@@ -1901,9 +1908,9 @@ static int prepare_acpi(struct domain *d, struct kernel_info *kinfo)
 
     /* Map the EFI and ACPI tables to Dom0 */
     rc = map_regions_p2mt(d,
-                          _gfn(paddr_to_pfn(d->arch.efi_acpi_gpa)),
+                          gaddr_to_gfn(d->arch.efi_acpi_gpa),
                           PFN_UP(d->arch.efi_acpi_len),
-                          _mfn(paddr_to_pfn(virt_to_maddr(d->arch.efi_acpi_table))),
+                          virt_to_mfn(d->arch.efi_acpi_table),
                           p2m_mmio_direct_c);
     if ( rc != 0 )
     {
@@ -2014,7 +2021,7 @@ static void initrd_load(struct kernel_info *kinfo)
             return;
         }
 
-        dst = map_domain_page(_mfn(paddr_to_pfn(ma)));
+        dst = map_domain_page(maddr_to_mfn(ma));
 
         copy_from_paddr(dst + s, paddr + offs, l);
 

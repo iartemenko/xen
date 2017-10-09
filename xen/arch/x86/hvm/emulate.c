@@ -14,12 +14,14 @@
 #include <xen/sched.h>
 #include <xen/paging.h>
 #include <xen/trace.h>
+#include <xen/vm_event.h>
 #include <asm/event.h>
 #include <asm/i387.h>
 #include <asm/xstate.h>
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/ioreq.h>
+#include <asm/hvm/monitor.h>
 #include <asm/hvm/trace.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/svm/svm.h>
@@ -100,7 +102,7 @@ static int ioreq_server_read(const struct hvm_io_handler *io_handler,
                     uint32_t size,
                     uint64_t *data)
 {
-    if ( hvm_copy_from_guest_phys(data, addr, size) != HVMCOPY_okay )
+    if ( hvm_copy_from_guest_phys(data, addr, size) != HVMTRANS_okay )
         return X86EMUL_UNHANDLEABLE;
 
     return X86EMUL_OKAY;
@@ -284,9 +286,14 @@ static int hvmemul_do_io(
         }
         break;
     }
+    case X86EMUL_UNIMPLEMENTED:
+        ASSERT_UNREACHABLE();
+        /* Fall-through */
     default:
         BUG();
     }
+
+    ASSERT(rc != X86EMUL_UNIMPLEMENTED);
 
     if ( rc != X86EMUL_OKAY )
         return rc;
@@ -313,6 +320,9 @@ static int hvmemul_do_io_buffer(
 
     rc = hvmemul_do_io(is_mmio, addr, reps, size, dir, df, 0,
                        (uintptr_t)buffer);
+
+    ASSERT(rc != X86EMUL_UNIMPLEMENTED);
+
     if ( rc == X86EMUL_UNHANDLEABLE && dir == IOREQ_READ )
         memset(buffer, 0xff, size);
 
@@ -404,6 +414,8 @@ static int hvmemul_do_io_addr(
 
     rc = hvmemul_do_io(is_mmio, addr, &count, size, dir, df, 1,
                        ram_gpa);
+
+    ASSERT(rc != X86EMUL_UNIMPLEMENTED);
 
     if ( rc == X86EMUL_OKAY )
         v->arch.hvm_vcpu.hvm_io.mmio_retry = (count < *reps);
@@ -566,15 +578,16 @@ static int hvmemul_linear_to_phys(
             if ( pfec & (PFEC_page_paged | PFEC_page_shared) )
                 return X86EMUL_RETRY;
             done /= bytes_per_rep;
-            *reps = done;
             if ( done == 0 )
             {
                 ASSERT(!reverse);
                 if ( npfn != gfn_x(INVALID_GFN) )
                     return X86EMUL_UNHANDLEABLE;
+                *reps = 0;
                 x86_emul_pagefault(pfec, addr & PAGE_MASK, &hvmemul_ctxt->ctxt);
                 return X86EMUL_EXCEPTION;
             }
+            *reps = done;
             break;
         }
 
@@ -873,7 +886,7 @@ static int __hvmemul_read(
 
     if ( is_x86_system_segment(seg) )
         pfec |= PFEC_implicit;
-    else if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    else if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     rc = hvmemul_virtual_to_linear(
@@ -892,18 +905,18 @@ static int __hvmemul_read(
 
     switch ( rc )
     {
-    case HVMCOPY_okay:
+    case HVMTRANS_okay:
         break;
-    case HVMCOPY_bad_gva_to_gfn:
+    case HVMTRANS_bad_linear_to_gfn:
         x86_emul_pagefault(pfinfo.ec, pfinfo.linear, &hvmemul_ctxt->ctxt);
         return X86EMUL_EXCEPTION;
-    case HVMCOPY_bad_gfn_to_mfn:
+    case HVMTRANS_bad_gfn_to_mfn:
         if ( access_type == hvm_access_insn_fetch )
             return X86EMUL_UNHANDLEABLE;
 
         return hvmemul_linear_mmio_read(addr, bytes, p_data, pfec, hvmemul_ctxt, 0);
-    case HVMCOPY_gfn_paged_out:
-    case HVMCOPY_gfn_shared:
+    case HVMTRANS_gfn_paged_out:
+    case HVMTRANS_gfn_shared:
         return X86EMUL_RETRY;
     default:
         return X86EMUL_UNHANDLEABLE;
@@ -939,7 +952,8 @@ int hvmemul_insn_fetch(
 {
     struct hvm_emulate_ctxt *hvmemul_ctxt =
         container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
-    unsigned int insn_off = offset - hvmemul_ctxt->insn_buf_eip;
+    /* Careful, as offset can wrap or truncate WRT insn_buf_eip. */
+    uint8_t insn_off = offset - hvmemul_ctxt->insn_buf_eip;
 
     /*
      * Fall back if requested bytes are not in the prefetch cache.
@@ -953,7 +967,17 @@ int hvmemul_insn_fetch(
 
         if ( rc == X86EMUL_OKAY && bytes )
         {
-            ASSERT(insn_off + bytes <= sizeof(hvmemul_ctxt->insn_buf));
+            /*
+             * Will we overflow insn_buf[]?  This shouldn't be able to happen,
+             * which means something went wrong with instruction decoding...
+             */
+            if ( insn_off >= sizeof(hvmemul_ctxt->insn_buf) ||
+                 insn_off + bytes > sizeof(hvmemul_ctxt->insn_buf) )
+            {
+                ASSERT_UNREACHABLE();
+                return X86EMUL_UNHANDLEABLE;
+            }
+
             memcpy(&hvmemul_ctxt->insn_buf[insn_off], p_data, bytes);
             hvmemul_ctxt->insn_buf_bytes = insn_off + bytes;
         }
@@ -984,7 +1008,7 @@ static int hvmemul_write(
 
     if ( is_x86_system_segment(seg) )
         pfec |= PFEC_implicit;
-    else if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    else if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     rc = hvmemul_virtual_to_linear(
@@ -1000,15 +1024,15 @@ static int hvmemul_write(
 
     switch ( rc )
     {
-    case HVMCOPY_okay:
+    case HVMTRANS_okay:
         break;
-    case HVMCOPY_bad_gva_to_gfn:
+    case HVMTRANS_bad_linear_to_gfn:
         x86_emul_pagefault(pfinfo.ec, pfinfo.linear, &hvmemul_ctxt->ctxt);
         return X86EMUL_EXCEPTION;
-    case HVMCOPY_bad_gfn_to_mfn:
+    case HVMTRANS_bad_gfn_to_mfn:
         return hvmemul_linear_mmio_write(addr, bytes, p_data, pfec, hvmemul_ctxt, 0);
-    case HVMCOPY_gfn_paged_out:
-    case HVMCOPY_gfn_shared:
+    case HVMTRANS_gfn_paged_out:
+    case HVMTRANS_gfn_shared:
         return X86EMUL_RETRY;
     default:
         return X86EMUL_UNHANDLEABLE;
@@ -1161,7 +1185,7 @@ static int hvmemul_rep_ins(
     if ( rc != X86EMUL_OKAY )
         return rc;
 
-    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     rc = hvmemul_linear_to_phys(
@@ -1230,7 +1254,7 @@ static int hvmemul_rep_outs(
     if ( rc != X86EMUL_OKAY )
         return rc;
 
-    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     rc = hvmemul_linear_to_phys(
@@ -1277,7 +1301,7 @@ static int hvmemul_rep_movs(
     if ( rc != X86EMUL_OKAY )
         return rc;
 
-    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     if ( vio->mmio_access.read_access &&
@@ -1372,7 +1396,7 @@ static int hvmemul_rep_movs(
             return rc;
         }
 
-        rc = HVMCOPY_okay;
+        rc = HVMTRANS_okay;
     }
     else
         /*
@@ -1382,16 +1406,16 @@ static int hvmemul_rep_movs(
          */
         rc = hvm_copy_from_guest_phys(buf, sgpa, bytes);
 
-    if ( rc == HVMCOPY_okay )
+    if ( rc == HVMTRANS_okay )
         rc = hvm_copy_to_guest_phys(dgpa, buf, bytes, current);
 
     xfree(buf);
 
-    if ( rc == HVMCOPY_gfn_paged_out )
+    if ( rc == HVMTRANS_gfn_paged_out )
         return X86EMUL_RETRY;
-    if ( rc == HVMCOPY_gfn_shared )
+    if ( rc == HVMTRANS_gfn_shared )
         return X86EMUL_RETRY;
-    if ( rc != HVMCOPY_okay )
+    if ( rc != HVMTRANS_okay )
     {
         gdprintk(XENLOG_WARNING, "Failed memory-to-memory REP MOVS: sgpa=%"
                  PRIpaddr" dgpa=%"PRIpaddr" reps=%lu bytes_per_rep=%u\n",
@@ -1435,7 +1459,7 @@ static int hvmemul_rep_stos(
     {
         uint32_t pfec = PFEC_page_present | PFEC_write_access;
 
-        if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+        if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
             pfec |= PFEC_user_mode;
 
         rc = hvmemul_linear_to_phys(addr, &gpa, bytes_per_rep, reps, pfec,
@@ -1501,10 +1525,10 @@ static int hvmemul_rep_stos(
 
         switch ( rc )
         {
-        case HVMCOPY_gfn_paged_out:
-        case HVMCOPY_gfn_shared:
+        case HVMTRANS_gfn_paged_out:
+        case HVMTRANS_gfn_shared:
             return X86EMUL_RETRY;
-        case HVMCOPY_okay:
+        case HVMTRANS_okay:
             return X86EMUL_OKAY;
         }
 
@@ -2033,7 +2057,8 @@ int hvm_emulate_one_mmio(unsigned long mfn, unsigned long gla)
     switch ( rc )
     {
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, "MMCFG", &ctxt);
+    case X86EMUL_UNIMPLEMENTED:
+        hvm_dump_emulation_state(XENLOG_G_WARNING, "MMCFG", &ctxt, rc);
         break;
     case X86EMUL_EXCEPTION:
         hvm_inject_event(&ctxt.ctxt.event);
@@ -2090,8 +2115,12 @@ void hvm_emulate_one_vm_event(enum emul_kind kind, unsigned int trapnr,
          * consistent with X86EMUL_RETRY.
          */
         return;
+    case X86EMUL_UNIMPLEMENTED:
+        if ( hvm_monitor_emul_unimplemented() )
+            return;
+        /* fall-through */
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_DEBUG, "Mem event", &ctx);
+        hvm_dump_emulation_state(XENLOG_G_DEBUG, "Mem event", &ctx, rc);
         hvm_inject_hw_exception(trapnr, errcode);
         break;
     case X86EMUL_EXCEPTION:
@@ -2133,17 +2162,17 @@ void hvm_emulate_init_per_insn(
     hvmemul_ctxt->ctxt.lma = hvm_long_mode_active(curr);
 
     if ( hvmemul_ctxt->ctxt.lma &&
-         hvmemul_ctxt->seg_reg[x86_seg_cs].attr.fields.l )
+         hvmemul_ctxt->seg_reg[x86_seg_cs].l )
         hvmemul_ctxt->ctxt.addr_size = hvmemul_ctxt->ctxt.sp_size = 64;
     else
     {
         hvmemul_ctxt->ctxt.addr_size =
-            hvmemul_ctxt->seg_reg[x86_seg_cs].attr.fields.db ? 32 : 16;
+            hvmemul_ctxt->seg_reg[x86_seg_cs].db ? 32 : 16;
         hvmemul_ctxt->ctxt.sp_size =
-            hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.db ? 32 : 16;
+            hvmemul_ctxt->seg_reg[x86_seg_ss].db ? 32 : 16;
     }
 
-    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.dpl == 3 )
+    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].dpl == 3 )
         pfec |= PFEC_user_mode;
 
     hvmemul_ctxt->insn_buf_eip = hvmemul_ctxt->ctxt.regs->rip;
@@ -2160,7 +2189,7 @@ void hvm_emulate_init_per_insn(
                                         &addr) &&
              hvm_fetch_from_guest_linear(hvmemul_ctxt->insn_buf, addr,
                                          sizeof(hvmemul_ctxt->insn_buf),
-                                         pfec, NULL) == HVMCOPY_okay) ?
+                                         pfec, NULL) == HVMTRANS_okay) ?
             sizeof(hvmemul_ctxt->insn_buf) : 0;
     }
     else
@@ -2219,16 +2248,17 @@ static const char *guest_x86_mode_to_str(int mode)
 }
 
 void hvm_dump_emulation_state(const char *loglvl, const char *prefix,
-                              struct hvm_emulate_ctxt *hvmemul_ctxt)
+                              struct hvm_emulate_ctxt *hvmemul_ctxt, int rc)
 {
     struct vcpu *curr = current;
     const char *mode_str = guest_x86_mode_to_str(hvm_guest_x86_mode(curr));
     const struct segment_register *cs =
         hvmemul_get_seg_reg(x86_seg_cs, hvmemul_ctxt);
 
-    printk("%s%s emulation failed: %pv %s @ %04x:%08lx -> %*ph\n",
-           loglvl, prefix, curr, mode_str, cs->sel, hvmemul_ctxt->insn_buf_eip,
-           hvmemul_ctxt->insn_buf_bytes, hvmemul_ctxt->insn_buf);
+    printk("%s%s emulation failed (%d): %pv %s @ %04x:%08lx -> %*ph\n",
+           loglvl, prefix, rc, curr, mode_str, cs->sel,
+           hvmemul_ctxt->insn_buf_eip, hvmemul_ctxt->insn_buf_bytes,
+           hvmemul_ctxt->insn_buf);
 }
 
 /*

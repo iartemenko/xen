@@ -74,9 +74,10 @@ static s8 __read_mostly opt_ept_ad = -1;
  *  pml                 Enable PML
  *  ad                  Use A/D bits
  */
-static void __init parse_ept_param(char *s)
+static int __init parse_ept_param(const char *s)
 {
-    char *ss;
+    const char *ss;
+    int rc = 0;
 
     do {
         bool_t val = !!strncmp(s, "no-", 3);
@@ -85,16 +86,20 @@ static void __init parse_ept_param(char *s)
             s += 3;
 
         ss = strchr(s, ',');
-        if ( ss )
-            *ss = '\0';
+        if ( !ss )
+            ss = strchr(s, '\0');
 
-        if ( !strcmp(s, "pml") )
+        if ( !strncmp(s, "pml", ss - s) )
             opt_pml_enabled = val;
-        else if ( !strcmp(s, "ad") )
+        else if ( !strncmp(s, "ad", ss - s) )
             opt_ept_ad = val;
+        else
+            rc = -EINVAL;
 
         s = ss + 1;
-    } while ( ss );
+    } while ( *ss );
+
+    return rc;
 }
 custom_param("ept", parse_ept_param);
 
@@ -345,11 +350,19 @@ static int vmx_init_vmcs_config(void)
 
     /*
      * "Process posted interrupt" can be set only when "virtual-interrupt
-     * delivery" and "acknowledge interrupt on exit" is set
+     * delivery" and "acknowledge interrupt on exit" is set. For the latter
+     * is a minimal requirement, only check the former, which is optional.
      */
-    if ( !(_vmx_secondary_exec_control & SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY)
-          || !(_vmx_vmexit_control & VM_EXIT_ACK_INTR_ON_EXIT) )
-        _vmx_pin_based_exec_control  &= ~ PIN_BASED_POSTED_INTERRUPT;
+    if ( !(_vmx_secondary_exec_control & SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY) )
+        _vmx_pin_based_exec_control &= ~PIN_BASED_POSTED_INTERRUPT;
+
+    if ( iommu_intpost &&
+         !(_vmx_pin_based_exec_control & PIN_BASED_POSTED_INTERRUPT) )
+    {
+        printk("Intel VT-d Posted Interrupt is disabled for CPU-side Posted "
+               "Interrupt is not enabled\n");
+        iommu_intpost = 0;
+    }
 
     /* The IA32_VMX_VMFUNC MSR exists only when VMFUNC is available */
     if ( _vmx_secondary_exec_control & SECONDARY_EXEC_ENABLE_VM_FUNCTIONS )
@@ -595,7 +608,7 @@ void vmx_cpu_dead(unsigned int cpu)
     vmx_pi_desc_fixup(cpu);
 }
 
-int vmx_cpu_up(void)
+int _vmx_cpu_up(bool bsp)
 {
     u32 eax, edx;
     int rc, bios_locked, cpu = smp_processor_id();
@@ -644,7 +657,7 @@ int vmx_cpu_up(void)
 
     INIT_LIST_HEAD(&this_cpu(active_vmcs_list));
 
-    if ( (rc = vmx_cpu_up_prepare(cpu)) != 0 )
+    if ( bsp && (rc = vmx_cpu_up_prepare(cpu)) != 0 )
         return rc;
 
     switch ( __vmxon(this_cpu(vmxon_region)) )
@@ -683,6 +696,11 @@ int vmx_cpu_up(void)
     vmx_pi_per_cpu_init(cpu);
 
     return 0;
+}
+
+int vmx_cpu_up()
+{
+    return _vmx_cpu_up(false);
 }
 
 void vmx_cpu_down(void)
@@ -802,9 +820,10 @@ static void vmx_set_host_env(struct vcpu *v)
               (unsigned long)&get_cpu_info()->guest_cpu_user_regs.error_code);
 }
 
-void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
+void vmx_clear_msr_intercept(struct vcpu *v, unsigned int msr,
+                             enum vmx_msr_intercept_type type)
 {
-    unsigned long *msr_bitmap = v->arch.hvm_vmx.msr_bitmap;
+    struct vmx_msr_bitmap *msr_bitmap = v->arch.hvm_vmx.msr_bitmap;
     struct domain *d = v->domain;
 
     /* VMX MSR bitmap supported? */
@@ -814,94 +833,65 @@ void vmx_disable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
     if ( unlikely(monitored_msr(d, msr)) )
         return;
 
-    /*
-     * See Intel PRM Vol. 3, 20.6.9 (MSR-Bitmap Address). Early manuals
-     * have the write-low and read-high bitmap offsets the wrong way round.
-     * We can control MSRs 0x00000000-0x00001fff and 0xc0000000-0xc0001fff.
-     */
     if ( msr <= 0x1fff )
     {
-        if ( type & MSR_TYPE_R )
-            clear_bit(msr, msr_bitmap + 0x000/BYTES_PER_LONG); /* read-low */
-        if ( type & MSR_TYPE_W )
-            clear_bit(msr, msr_bitmap + 0x800/BYTES_PER_LONG); /* write-low */
+        if ( type & VMX_MSR_R )
+            clear_bit(msr, msr_bitmap->read_low);
+        if ( type & VMX_MSR_W )
+            clear_bit(msr, msr_bitmap->write_low);
     }
     else if ( (msr >= 0xc0000000) && (msr <= 0xc0001fff) )
     {
         msr &= 0x1fff;
-        if ( type & MSR_TYPE_R )
-            clear_bit(msr, msr_bitmap + 0x400/BYTES_PER_LONG); /* read-high */
-        if ( type & MSR_TYPE_W )
-            clear_bit(msr, msr_bitmap + 0xc00/BYTES_PER_LONG); /* write-high */
+        if ( type & VMX_MSR_R )
+            clear_bit(msr, msr_bitmap->read_high);
+        if ( type & VMX_MSR_W )
+            clear_bit(msr, msr_bitmap->write_high);
     }
     else
-        HVM_DBG_LOG(DBG_LEVEL_MSR,
-                   "msr %x is out of the control range"
-                   "0x00000000-0x00001fff and 0xc0000000-0xc0001fff"
-                   "RDMSR or WRMSR will cause a VM exit", msr); 
-
+        ASSERT(!"MSR out of range for interception\n");
 }
 
-void vmx_enable_intercept_for_msr(struct vcpu *v, u32 msr, int type)
+void vmx_set_msr_intercept(struct vcpu *v, unsigned int msr,
+                           enum vmx_msr_intercept_type type)
 {
-    unsigned long *msr_bitmap = v->arch.hvm_vmx.msr_bitmap;
+    struct vmx_msr_bitmap *msr_bitmap = v->arch.hvm_vmx.msr_bitmap;
 
     /* VMX MSR bitmap supported? */
     if ( msr_bitmap == NULL )
         return;
 
-    /*
-     * See Intel PRM Vol. 3, 20.6.9 (MSR-Bitmap Address). Early manuals
-     * have the write-low and read-high bitmap offsets the wrong way round.
-     * We can control MSRs 0x00000000-0x00001fff and 0xc0000000-0xc0001fff.
-     */
     if ( msr <= 0x1fff )
     {
-        if ( type & MSR_TYPE_R )
-            set_bit(msr, msr_bitmap + 0x000/BYTES_PER_LONG); /* read-low */
-        if ( type & MSR_TYPE_W )
-            set_bit(msr, msr_bitmap + 0x800/BYTES_PER_LONG); /* write-low */
+        if ( type & VMX_MSR_R )
+            set_bit(msr, msr_bitmap->read_low);
+        if ( type & VMX_MSR_W )
+            set_bit(msr, msr_bitmap->write_low);
     }
     else if ( (msr >= 0xc0000000) && (msr <= 0xc0001fff) )
     {
         msr &= 0x1fff;
-        if ( type & MSR_TYPE_R )
-            set_bit(msr, msr_bitmap + 0x400/BYTES_PER_LONG); /* read-high */
-        if ( type & MSR_TYPE_W )
-            set_bit(msr, msr_bitmap + 0xc00/BYTES_PER_LONG); /* write-high */
+        if ( type & VMX_MSR_R )
+            set_bit(msr, msr_bitmap->read_high);
+        if ( type & VMX_MSR_W )
+            set_bit(msr, msr_bitmap->write_high);
     }
     else
-        HVM_DBG_LOG(DBG_LEVEL_MSR,
-                   "msr %x is out of the control range"
-                   "0x00000000-0x00001fff and 0xc0000000-0xc0001fff"
-                   "RDMSR or WRMSR will cause a VM exit", msr); 
+        ASSERT(!"MSR out of range for interception\n");
 }
 
-/*
- * access_type: read == 0, write == 1
- */
-int vmx_check_msr_bitmap(unsigned long *msr_bitmap, u32 msr, int access_type)
+bool vmx_msr_is_intercepted(struct vmx_msr_bitmap *msr_bitmap,
+                            unsigned int msr, bool is_write)
 {
-    int ret = 1;
-    if ( !msr_bitmap )
-        return 1;
-
     if ( msr <= 0x1fff )
-    {
-        if ( access_type == 0 )
-            ret = test_bit(msr, msr_bitmap + 0x000/BYTES_PER_LONG); /* read-low */
-        else if ( access_type == 1 )
-            ret = test_bit(msr, msr_bitmap + 0x800/BYTES_PER_LONG); /* write-low */
-    }
+        return test_bit(msr, is_write ? msr_bitmap->write_low
+                                      : msr_bitmap->read_low);
     else if ( (msr >= 0xc0000000) && (msr <= 0xc0001fff) )
-    {
-        msr &= 0x1fff;
-        if ( access_type == 0 )
-            ret = test_bit(msr, msr_bitmap + 0x400/BYTES_PER_LONG); /* read-high */
-        else if ( access_type == 1 )
-            ret = test_bit(msr, msr_bitmap + 0xc00/BYTES_PER_LONG); /* write-high */
-    }
-    return ret;
+        return test_bit(msr & 0x1fff, is_write ? msr_bitmap->write_high
+                                               : msr_bitmap->read_high);
+    else
+        /* MSRs outside the bitmap ranges are always intercepted. */
+        return true;
 }
 
 
@@ -1092,7 +1082,7 @@ static int construct_vmcs(struct vcpu *v)
     /* MSR access bitmap. */
     if ( cpu_has_vmx_msr_bitmap )
     {
-        unsigned long *msr_bitmap = alloc_xenheap_page();
+        struct vmx_msr_bitmap *msr_bitmap = alloc_xenheap_page();
 
         if ( msr_bitmap == NULL )
         {
@@ -1104,17 +1094,17 @@ static int construct_vmcs(struct vcpu *v)
         v->arch.hvm_vmx.msr_bitmap = msr_bitmap;
         __vmwrite(MSR_BITMAP, virt_to_maddr(msr_bitmap));
 
-        vmx_disable_intercept_for_msr(v, MSR_FS_BASE, MSR_TYPE_R | MSR_TYPE_W);
-        vmx_disable_intercept_for_msr(v, MSR_GS_BASE, MSR_TYPE_R | MSR_TYPE_W);
-        vmx_disable_intercept_for_msr(v, MSR_SHADOW_GS_BASE, MSR_TYPE_R | MSR_TYPE_W);
-        vmx_disable_intercept_for_msr(v, MSR_IA32_SYSENTER_CS, MSR_TYPE_R | MSR_TYPE_W);
-        vmx_disable_intercept_for_msr(v, MSR_IA32_SYSENTER_ESP, MSR_TYPE_R | MSR_TYPE_W);
-        vmx_disable_intercept_for_msr(v, MSR_IA32_SYSENTER_EIP, MSR_TYPE_R | MSR_TYPE_W);
+        vmx_clear_msr_intercept(v, MSR_FS_BASE, VMX_MSR_RW);
+        vmx_clear_msr_intercept(v, MSR_GS_BASE, VMX_MSR_RW);
+        vmx_clear_msr_intercept(v, MSR_SHADOW_GS_BASE, VMX_MSR_RW);
+        vmx_clear_msr_intercept(v, MSR_IA32_SYSENTER_CS, VMX_MSR_RW);
+        vmx_clear_msr_intercept(v, MSR_IA32_SYSENTER_ESP, VMX_MSR_RW);
+        vmx_clear_msr_intercept(v, MSR_IA32_SYSENTER_EIP, VMX_MSR_RW);
         if ( paging_mode_hap(d) && (!iommu_enabled || iommu_snoop) )
-            vmx_disable_intercept_for_msr(v, MSR_IA32_CR_PAT, MSR_TYPE_R | MSR_TYPE_W);
+            vmx_clear_msr_intercept(v, MSR_IA32_CR_PAT, VMX_MSR_RW);
         if ( (vmexit_ctl & VM_EXIT_CLEAR_BNDCFGS) &&
              (vmentry_ctl & VM_ENTRY_LOAD_BNDCFGS) )
-            vmx_disable_intercept_for_msr(v, MSR_IA32_BNDCFGS, MSR_TYPE_R | MSR_TYPE_W);
+            vmx_clear_msr_intercept(v, MSR_IA32_BNDCFGS, VMX_MSR_RW);
     }
 
     /* I/O access bitmap. */
@@ -1956,6 +1946,21 @@ void __init setup_vmcs_dump(void)
     register_keyhandler('v', vmcs_dump, "dump VT-x VMCSs", 1);
 }
 
+static void __init __maybe_unused build_assertions(void)
+{
+    struct vmx_msr_bitmap bitmap;
+
+    /* Check vmx_msr_bitmap layoug against hardware expectations. */
+    BUILD_BUG_ON(sizeof(bitmap)            != PAGE_SIZE);
+    BUILD_BUG_ON(sizeof(bitmap.read_low)   != 1024);
+    BUILD_BUG_ON(sizeof(bitmap.read_high)  != 1024);
+    BUILD_BUG_ON(sizeof(bitmap.write_low)  != 1024);
+    BUILD_BUG_ON(sizeof(bitmap.write_high) != 1024);
+    BUILD_BUG_ON(offsetof(struct vmx_msr_bitmap, read_low)   != 0);
+    BUILD_BUG_ON(offsetof(struct vmx_msr_bitmap, read_high)  != 1024);
+    BUILD_BUG_ON(offsetof(struct vmx_msr_bitmap, write_low)  != 2048);
+    BUILD_BUG_ON(offsetof(struct vmx_msr_bitmap, write_high) != 3072);
+}
 
 /*
  * Local variables:

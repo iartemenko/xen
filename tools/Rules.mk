@@ -163,9 +163,7 @@ else
 CFLAGS += -O2 -fomit-frame-pointer
 endif
 
-LIBXL_BLKTAP ?= $(CONFIG_BLKTAP2)
-
-ifeq ($(LIBXL_BLKTAP),y)
+ifeq ($(CONFIG_BLKTAP2),y)
 CFLAGS_libblktapctl = -I$(XEN_BLKTAP2)/control -I$(XEN_BLKTAP2)/include $(CFLAGS_xeninclude)
 SHDEPS_libblktapctl =
 LDLIBS_libblktapctl = $(SHDEPS_libblktapctl) $(XEN_BLKTAP2)/control/libblktapctl$(libextension)
@@ -175,6 +173,7 @@ CFLAGS_libblktapctl =
 SHDEPS_libblktapctl =
 LDLIBS_libblktapctl =
 SHLIB_libblktapctl  =
+PKG_CONFIG_REMOVE += xenblktapctl
 endif
 
 CFLAGS_libxenlight = -I$(XEN_XENLIGHT) $(CFLAGS_libxenctrl) $(CFLAGS_xeninclude)
@@ -232,12 +231,12 @@ headers.chk:
 	done >$@.new
 	mv $@.new $@
 
-subdirs-all subdirs-clean subdirs-install subdirs-distclean: .phony
+subdirs-all subdirs-clean subdirs-install subdirs-distclean subdirs-uninstall: .phony
 	@set -e; for subdir in $(SUBDIRS) $(SUBDIRS-y); do \
 		$(MAKE) subdir-$(patsubst subdirs-%,%,$@)-$$subdir; \
 	done
 
-subdir-all-% subdir-clean-% subdir-install-%: .phony
+subdir-all-% subdir-clean-% subdir-install-% subdir-uninstall-%: .phony
 	$(MAKE) -C $* $(patsubst subdir-%-$*,%,$@)
 
 subdir-distclean-%: .phony
@@ -250,6 +249,8 @@ endif
 
 PKG_CONFIG_DIR ?= $(XEN_ROOT)/tools/pkg-config
 
+PKG_CONFIG_FILTER = $(foreach l,$(PKG_CONFIG_REMOVE),-e 's!\([ ,]\)$(l),!\1!g' -e 's![ ,]$(l)$$!!g')
+
 $(PKG_CONFIG_DIR)/%.pc: %.pc.in Makefile
 	mkdir -p $(PKG_CONFIG_DIR)
 	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
@@ -259,7 +260,8 @@ $(PKG_CONFIG_DIR)/%.pc: %.pc.in Makefile
 	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
 	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
 	     -e 's!@@cflagslocal@@!$(PKG_CONFIG_CFLAGS_LOCAL)!g' \
-	     -e 's!@@libsflag@@!-Wl,-rpath-link=!g' < $< > $@
+	     -e 's!@@libsflag@@!-Wl,-rpath-link=!g' \
+	     $(PKG_CONFIG_FILTER) < $< > $@
 
 %.pc: %.pc.in Makefile
 	@sed -e 's!@@version@@!$(PKG_CONFIG_VERSION)!g' \
@@ -269,4 +271,5 @@ $(PKG_CONFIG_DIR)/%.pc: %.pc.in Makefile
 	     -e 's!@@firmwaredir@@!$(XENFIRMWAREDIR)!g' \
 	     -e 's!@@libexecbin@@!$(LIBEXEC_BIN)!g' \
 	     -e 's!@@cflagslocal@@!!g' \
-	     -e 's!@@libsflag@@!-L!g' < $< > $@
+	     -e 's!@@libsflag@@!-L!g' \
+	     $(PKG_CONFIG_FILTER) < $< > $@

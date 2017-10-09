@@ -7680,23 +7680,26 @@ void sched_process(struct pcpu_info *p)
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    int credit, delta;
+                    int credit, budget, delta;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:burn_credits d%uv%u, credit = %d, delta = %d\n",
-                       ri->dump_header, r->domid, r->vcpuid,
-                       r->credit, r->delta);
+                printf(" %s csched2:burn_credits d%uv%u, credit = %d, ",
+                       ri->dump_header, r->domid, r->vcpuid, r->credit);
+                if ( r->budget != INT_MIN )
+                    printf("budget = %d, ", r->budget);
+                printf("delta = %d\n", r->delta);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 5): /* TICKLE_CHECK      */
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    int credit;
+                    int credit, score;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:tickle_check d%uv%u, credit = %d\n",
-                       ri->dump_header, r->domid, r->vcpuid, r->credit);
+                printf(" %s csched2:tickle_check d%uv%u, credit = %d, score = %d\n\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->credit, r->score);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 6): /* TICKLE            */
@@ -7967,6 +7970,71 @@ void sched_process(struct pcpu_info *p)
                        r->idle ? ", idle" : ", busy",
                        r->tickled ? ", tickled" : ", not tickled");
             }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 1): /* PICKED_CPU */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t new_cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:picked_cpu d%uv%u, cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->new_cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 2): /* VCPU_ASSIGN */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:vcpu_assign d%uv%u to cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 3): /* VCPU_DEASSIGN */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:vcpu_deassign d%uv%u from cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 4): /* MIGRATE */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint16_t cpu, new_cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:migrate d%uv%u, cpu %u, new_cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->cpu, r->new_cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 5): /* SCHEDULE */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t tasklet, cpu;
+                    int16_t vcpuid, domid;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:schedule cpu %u%s",
+                       ri->dump_header, r->cpu,
+                       r->tasklet ? ", tasklet scheduled" : "");
+                if (r->vcpuid != -1)
+                    printf(", vcpu d%uv%d\n", r->domid, r->vcpuid);
+                else
+                    printf(", no vcpu\n");
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 6): /* TASKLET */
+            if (opt.dump_all)
+                printf(" %s null:sched_tasklet\n", ri->dump_header);
             break;
         default:
             process_generic(ri);

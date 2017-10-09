@@ -700,7 +700,7 @@ void restore_vcpu_affinity(struct domain *d)
                     cpupool_domain_cpumask(v->domain));
         v->processor = cpumask_any(cpumask_scratch_cpu(cpu));
 
-        spin_unlock_irq(lock);;
+        spin_unlock_irq(lock);
 
         lock = vcpu_schedule_lock_irq(v);
         v->processor = SCHED_OP(vcpu_scheduler(v), pick_cpu, v);
@@ -965,7 +965,7 @@ static long do_poll(struct sched_poll *sched_poll)
             goto out;
 
         rc = 0;
-        if ( evtchn_port_is_pending(d, evtchn_from_port(d, port)) )
+        if ( evtchn_port_is_pending(d, port) )
             goto out;
     }
 
@@ -1903,6 +1903,8 @@ void sched_tick_suspend(void)
 
     sched = per_cpu(scheduler, cpu);
     SCHED_OP(sched, tick_suspend, cpu);
+    rcu_idle_enter(cpu);
+    rcu_idle_timer_start();
 }
 
 void sched_tick_resume(void)
@@ -1910,6 +1912,8 @@ void sched_tick_resume(void)
     struct scheduler *sched;
     unsigned int cpu = smp_processor_id();
 
+    rcu_idle_timer_stop();
+    rcu_idle_exit(cpu);
     sched = per_cpu(scheduler, cpu);
     SCHED_OP(sched, tick_resume, cpu);
 }

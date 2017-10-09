@@ -9,6 +9,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#include <xen/bitops.h>
+#include <xen/errno.h>
+#include <xen/grant_table.h>
 #include <xen/hypercall.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -16,45 +19,66 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 #include <xen/wait.h>
-#include <xen/errno.h>
-#include <xen/bitops.h>
-#include <xen/grant_table.h>
 
+#include <asm/alternative.h>
+#include <asm/cpufeature.h>
 #include <asm/current.h>
 #include <asm/event.h>
-#include <asm/guest_access.h>
-#include <asm/regs.h>
-#include <asm/p2m.h>
-#include <asm/irq.h>
-#include <asm/cpufeature.h>
-#include <asm/vfp.h>
-#include <asm/procinfo.h>
-#include <asm/alternative.h>
-
 #include <asm/gic.h>
-#include <asm/vgic.h>
+#include <asm/guest_access.h>
+#include <asm/irq.h>
+#include <asm/p2m.h>
 #include <asm/platform.h>
-#include "vtimer.h"
+#include <asm/procinfo.h>
+#include <asm/regs.h>
+#include <asm/vfp.h>
+#include <asm/vgic.h>
+#include <asm/vtimer.h>
+
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
 
+static void do_idle(void)
+{
+    unsigned int cpu = smp_processor_id();
+
+    sched_tick_suspend();
+    /* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
+    process_pending_softirqs();
+
+    local_irq_disable();
+    if ( cpu_is_haltable(cpu) )
+    {
+        dsb(sy);
+        wfi();
+    }
+    local_irq_enable();
+
+    sched_tick_resume();
+}
+
 void idle_loop(void)
 {
+    unsigned int cpu = smp_processor_id();
+
     for ( ; ; )
     {
-        if ( cpu_is_offline(smp_processor_id()) )
+        if ( cpu_is_offline(cpu) )
             stop_cpu();
 
-        local_irq_disable();
-        if ( cpu_is_haltable(smp_processor_id()) )
-        {
-            dsb(sy);
-            wfi();
-        }
-        local_irq_enable();
+        /* Are we here for running vcpu context tasklets, or for idling? */
+        if ( unlikely(tasklet_work_to_do(cpu)) )
+            do_tasklet();
+        /*
+         * Test softirqs twice --- first to see if should even try scrubbing
+         * and then, after it is done, whether softirqs became pending
+         * while we were scrubbing.
+         */
+        else if ( !softirq_pending(cpu) && !scrub_free_pages() &&
+                  !softirq_pending(cpu) )
+            do_idle();
 
-        do_tasklet();
         do_softirq();
         /*
          * We MUST be last (or before dsb, wfi). Otherwise after we get the
@@ -358,11 +382,6 @@ void sync_vcpu_execstate(struct vcpu *v)
     __arg;                                                                  \
 })
 
-void hypercall_cancel_continuation(void)
-{
-    current->hcall_preempted = false;
-}
-
 unsigned long hypercall_create_continuation(
     unsigned int op, const char *format, ...)
 {
@@ -467,13 +486,11 @@ struct domain *alloc_domain_struct(void)
         return NULL;
 
     clear_page(d);
-    d->arch.grant_table_gfn = xzalloc_array(gfn_t, max_grant_frames);
     return d;
 }
 
 void free_domain_struct(struct domain *d)
 {
-    xfree(d->arch.grant_table_gfn);
     free_xenheap_page(d);
 }
 

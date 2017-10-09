@@ -35,6 +35,7 @@
 #define GITS_BASER5                     0x128
 #define GITS_BASER6                     0x130
 #define GITS_BASER7                     0x138
+#define GITS_PIDR2                      GICR_PIDR2
 
 /* Register bits */
 #define GITS_VALID_BIT                  BIT(63)
@@ -57,6 +58,7 @@
 #define GITS_TYPER_ITT_SIZE_MASK        (0xfUL << GITS_TYPER_ITT_SIZE_SHIFT)
 #define GITS_TYPER_ITT_SIZE(r)          ((((r) & GITS_TYPER_ITT_SIZE_MASK) >> \
                                                  GITS_TYPER_ITT_SIZE_SHIFT) + 1)
+#define GITS_TYPER_PHYSICAL             (1U << 0)
 
 #define GITS_BASER_INDIRECT             BIT(62)
 #define GITS_BASER_INNER_CACHEABILITY_SHIFT        59
@@ -76,6 +78,7 @@
                         (((reg >> GITS_BASER_ENTRY_SIZE_SHIFT) & 0x1f) + 1)
 #define GITS_BASER_SHAREABILITY_SHIFT   10
 #define GITS_BASER_PAGE_SIZE_SHIFT      8
+#define GITS_BASER_SIZE_MASK            0xff
 #define GITS_BASER_SHAREABILITY_MASK   (0x3ULL << GITS_BASER_SHAREABILITY_SHIFT)
 #define GITS_BASER_OUTER_CACHEABILITY_MASK   (0x7ULL << GITS_BASER_OUTER_CACHEABILITY_SHIFT)
 #define GITS_BASER_INNER_CACHEABILITY_MASK   (0x7ULL << GITS_BASER_INNER_CACHEABILITY_SHIFT)
@@ -134,6 +137,10 @@ void gicv3_its_dt_init(const struct dt_device_node *node);
 
 bool gicv3_its_host_has_its(void);
 
+unsigned int vgic_v3_its_count(const struct domain *d);
+
+void gicv3_do_LPI(unsigned int lpi);
+
 int gicv3_lpi_init_rdist(void __iomem * rdist_base);
 
 /* Initialize the host structures for LPIs and the host ITSes. */
@@ -151,6 +158,11 @@ int gicv3_its_setup_collection(unsigned int cpu);
 int vgic_v3_its_init_domain(struct domain *d);
 void vgic_v3_its_free_domain(struct domain *d);
 
+/* Create the appropriate DT nodes for a hardware domain. */
+int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
+                                  const struct dt_device_node *gic,
+                                  void *fdt);
+
 /*
  * Map a device on the host by allocating an ITT on the host (ITS).
  * "nr_event" specifies how many events (interrupts) this device will need.
@@ -164,6 +176,20 @@ int gicv3_its_map_guest_device(struct domain *d,
 int gicv3_allocate_host_lpi_block(struct domain *d, uint32_t *first_lpi);
 void gicv3_free_host_lpi_block(uint32_t first_lpi);
 
+void vgic_vcpu_inject_lpi(struct domain *d, unsigned int virq);
+
+struct pending_irq *gicv3_its_get_event_pending_irq(struct domain *d,
+                                                    paddr_t vdoorbell_address,
+                                                    uint32_t vdevid,
+                                                    uint32_t eventid);
+int gicv3_remove_guest_event(struct domain *d, paddr_t vdoorbell_address,
+                                     uint32_t vdevid, uint32_t eventid);
+struct pending_irq *gicv3_assign_guest_event(struct domain *d, paddr_t doorbell,
+                                             uint32_t devid, uint32_t eventid,
+                                             uint32_t virt_lpi);
+void gicv3_lpi_update_host_entry(uint32_t host_lpi, int domain_id,
+                                 uint32_t virt_lpi);
+
 #else
 
 static inline void gicv3_its_dt_init(const struct dt_device_node *node)
@@ -173,6 +199,17 @@ static inline void gicv3_its_dt_init(const struct dt_device_node *node)
 static inline bool gicv3_its_host_has_its(void)
 {
     return false;
+}
+
+static inline unsigned int vgic_v3_its_count(const struct domain *d)
+{
+    return 0;
+}
+
+static inline void gicv3_do_LPI(unsigned int lpi)
+{
+    /* We don't enable LPIs without an ITS. */
+    BUG();
 }
 
 static inline int gicv3_lpi_init_rdist(void __iomem * rdist_base)
@@ -208,6 +245,13 @@ static inline int vgic_v3_its_init_domain(struct domain *d)
 
 static inline void vgic_v3_its_free_domain(struct domain *d)
 {
+}
+
+static inline int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
+                                                const struct dt_device_node *gic,
+                                                void *fdt)
+{
+    return 0;
 }
 
 #endif /* CONFIG_HAS_ITS */

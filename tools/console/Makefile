@@ -19,7 +19,7 @@ all: $(BIN)
 
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS)
+	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS_RM)
 	$(RM) client/*.o daemon/*.o
 	$(RM) client/_paths.h
 	$(RM) daemon/_paths.h
@@ -49,4 +49,9 @@ install: $(BIN)
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_PROG) xenconsole $(DESTDIR)$(LIBEXEC_BIN)
 
--include $(DEPS)
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/xenconsole
+	rm -f $(DESTDIR)$(sbindir)/xenconsoled
+
+-include $(DEPS_INCLUDE)

@@ -261,7 +261,7 @@ static void gicv3_enable_sre(void)
 static void gicv3_do_wait_for_rwp(void __iomem *base)
 {
     uint32_t val;
-    bool_t timeout = 0;
+    bool timeout = false;
     s_time_t deadline = NOW() + MILLISECS(1000);
 
     do {
@@ -270,7 +270,7 @@ static void gicv3_do_wait_for_rwp(void __iomem *base)
             break;
         if ( NOW() > deadline )
         {
-            timeout = 1;
+            timeout = true;
             break;
         }
         cpu_relax();
@@ -590,7 +590,7 @@ static void __init gicv3_dist_init(void)
 static int gicv3_enable_redist(void)
 {
     uint32_t val;
-    bool_t timeout = 0;
+    bool timeout = false;
     s_time_t deadline = NOW() + MILLISECS(1000);
 
     /* Wake up this CPU redistributor */
@@ -604,7 +604,7 @@ static int gicv3_enable_redist(void)
             break;
         if ( NOW() > deadline )
         {
-            timeout = 1;
+            timeout = true;
             break;
         }
         cpu_relax();
@@ -618,6 +618,21 @@ static int gicv3_enable_redist(void)
     }
 
     return 0;
+}
+
+/* Enable LPIs on this redistributor (only useful when the host has an ITS). */
+static bool gicv3_enable_lpis(void)
+{
+    uint32_t val;
+
+    val = readl_relaxed(GICD_RDIST_BASE + GICR_TYPER);
+    if ( !(val & GICR_TYPER_PLPIS) )
+        return false;
+
+    val = readl_relaxed(GICD_RDIST_BASE + GICR_CTLR);
+    writel_relaxed(val | GICR_CTLR_ENABLE_LPIS, GICD_RDIST_BASE + GICR_CTLR);
+
+    return true;
 }
 
 static int __init gicv3_populate_rdist(void)
@@ -731,11 +746,14 @@ static int gicv3_cpu_init(void)
     if ( gicv3_enable_redist() )
         return -ENODEV;
 
+    /* If the host has any ITSes, enable LPIs now. */
     if ( gicv3_its_host_has_its() )
     {
         ret = gicv3_its_setup_collection(smp_processor_id());
         if ( ret )
             return ret;
+        if ( !gicv3_enable_lpis() )
+            return -EBUSY;
     }
 
     /* Set priority on PPI and SGI interrupts */
@@ -987,7 +1005,7 @@ static void gicv3_write_lr(int lr_reg, const struct gic_lr *lr)
     gicv3_ich_write_lr(lr_reg, lrv);
 }
 
-static void gicv3_hcr_status(uint32_t flag, bool_t status)
+static void gicv3_hcr_status(uint32_t flag, bool status)
 {
     uint32_t hcr;
 
@@ -1154,8 +1172,10 @@ static int gicv3_make_hwdom_dt_node(const struct domain *d,
 
     res = fdt_property(fdt, "reg", new_cells, len);
     xfree(new_cells);
+    if ( res )
+        return res;
 
-    return res;
+    return gicv3_its_make_hwdom_dt_nodes(d, gic, fdt);
 }
 
 static const hw_irq_controller gicv3_host_irq_type = {
@@ -1283,7 +1303,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     unsigned long mfn, nr;
 
     mfn = dbase >> PAGE_SHIFT;
-    nr = DIV_ROUND_UP(SZ_64K, PAGE_SIZE);
+    nr = PFN_UP(SZ_64K);
     rc = iomem_deny_access(d, mfn, mfn + nr);
     if ( rc )
         return rc;
@@ -1291,7 +1311,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     for ( i = 0; i < gicv3.rdist_count; i++ )
     {
         mfn = gicv3.rdist_regions[i].base >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(gicv3.rdist_regions[i].size, PAGE_SIZE);
+        nr = PFN_UP(gicv3.rdist_regions[i].size);
         rc = iomem_deny_access(d, mfn, mfn + nr);
         if ( rc )
             return rc;
@@ -1300,7 +1320,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     if ( cbase != INVALID_PADDR )
     {
         mfn = cbase >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(csize, PAGE_SIZE);
+        nr = PFN_UP(csize);
         rc = iomem_deny_access(d, mfn, mfn + nr);
         if ( rc )
             return rc;
@@ -1309,7 +1329,7 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     if ( vbase != INVALID_PADDR )
     {
         mfn = vbase >> PAGE_SHIFT;
-        nr = DIV_ROUND_UP(csize, PAGE_SIZE);
+        nr = PFN_UP(csize);
         return iomem_deny_access(d, mfn, mfn + nr);
     }
 
@@ -1579,6 +1599,7 @@ static int __init gicv3_init(void)
 {
     int res, i;
     uint32_t reg;
+    unsigned int intid_bits;
 
     if ( !cpu_has_gicv3 )
     {
@@ -1622,8 +1643,11 @@ static int __init gicv3_init(void)
                i, r->base, r->base + r->size);
     }
 
+    reg = readl_relaxed(GICD + GICD_TYPER);
+    intid_bits = GICD_TYPE_ID_BITS(reg);
+
     vgic_v3_setup_hw(dbase, gicv3.rdist_count, gicv3.rdist_regions,
-                     gicv3.rdist_stride);
+                     gicv3.rdist_stride, intid_bits);
     gicv3_init_v2();
 
     spin_lock_init(&gicv3.lock);
@@ -1670,6 +1694,7 @@ static const struct gic_hw_operations gicv3_ops = {
     .make_hwdom_dt_node  = gicv3_make_hwdom_dt_node,
     .make_hwdom_madt     = gicv3_make_hwdom_madt,
     .iomem_deny_access   = gicv3_iomem_deny_access,
+    .do_LPI              = gicv3_do_LPI,
 };
 
 static int __init gicv3_dt_preinit(struct dt_device_node *node, const void *data)

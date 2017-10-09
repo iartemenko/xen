@@ -10,7 +10,6 @@
 #include <xen/console.h>
 #include <xen/sched.h>
 #include <xen/shutdown.h>
-#include <xen/nmi.h>
 #include <xen/guest_access.h>
 #include <xen/watchdog.h>
 #include <xen/hypercall.h>
@@ -18,12 +17,12 @@
 #include <asm/flushtlb.h>
 #include <asm/traps.h>
 #include <asm/event.h>
+#include <asm/nmi.h>
 #include <asm/msr.h>
 #include <asm/page.h>
 #include <asm/shared.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
-#include <public/callback.h>
 
 
 static void print_xen_info(void)
@@ -207,9 +206,9 @@ void show_page_walk(unsigned long addr)
     mfn = l2e_get_pfn(l2e);
     pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
           get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
-    printk(" L2[0x%03lx] = %"PRIpte" %016lx %s\n",
+    printk(" L2[0x%03lx] = %"PRIpte" %016lx%s\n",
            l2_table_offset(addr), l2e_get_intpte(l2e), pfn,
-           (l2e_get_flags(l2e) & _PAGE_PSE) ? "(PSE)" : "");
+           (l2e_get_flags(l2e) & _PAGE_PSE) ? " (PSE)" : "");
     if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) ||
          (l2e_get_flags(l2e) & _PAGE_PSE) ||
          !mfn_valid(_mfn(mfn)) )
@@ -252,92 +251,6 @@ void do_double_fault(struct cpu_user_regs *regs)
     show_stack_overflow(cpu, regs);
 
     panic("DOUBLE FAULT -- system shutdown");
-}
-
-void toggle_guest_mode(struct vcpu *v)
-{
-    if ( is_pv_32bit_vcpu(v) )
-        return;
-    if ( cpu_has_fsgsbase )
-    {
-        if ( v->arch.flags & TF_kernel_mode )
-            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
-        else
-            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
-    }
-    v->arch.flags ^= TF_kernel_mode;
-    asm volatile ( "swapgs" );
-    update_cr3(v);
-    /* Don't flush user global mappings from the TLB. Don't tick TLB clock. */
-    asm volatile ( "mov %0, %%cr3" : : "r" (v->arch.cr3) : "memory" );
-
-    if ( !(v->arch.flags & TF_kernel_mode) )
-        return;
-
-    if ( v->arch.pv_vcpu.need_update_runstate_area &&
-         update_runstate_area(v) )
-        v->arch.pv_vcpu.need_update_runstate_area = 0;
-
-    if ( v->arch.pv_vcpu.pending_system_time.version &&
-         update_secondary_system_time(v,
-                                      &v->arch.pv_vcpu.pending_system_time) )
-        v->arch.pv_vcpu.pending_system_time.version = 0;
-}
-
-unsigned long do_iret(void)
-{
-    struct cpu_user_regs *regs = guest_cpu_user_regs();
-    struct iret_context iret_saved;
-    struct vcpu *v = current;
-
-    if ( unlikely(copy_from_user(&iret_saved, (void *)regs->rsp,
-                                 sizeof(iret_saved))) )
-    {
-        gprintk(XENLOG_ERR,
-                "Fault while reading IRET context from guest stack\n");
-        goto exit_and_crash;
-    }
-
-    /* Returning to user mode? */
-    if ( (iret_saved.cs & 3) == 3 )
-    {
-        if ( unlikely(pagetable_is_null(v->arch.guest_table_user)) )
-        {
-            gprintk(XENLOG_ERR,
-                    "Guest switching to user mode with no user page tables\n");
-            goto exit_and_crash;
-        }
-        toggle_guest_mode(v);
-    }
-
-    if ( VM_ASSIST(v->domain, architectural_iopl) )
-        v->arch.pv_vcpu.iopl = iret_saved.rflags & X86_EFLAGS_IOPL;
-
-    regs->rip    = iret_saved.rip;
-    regs->cs     = iret_saved.cs | 3; /* force guest privilege */
-    regs->rflags = ((iret_saved.rflags & ~(X86_EFLAGS_IOPL|X86_EFLAGS_VM))
-                    | X86_EFLAGS_IF);
-    regs->rsp    = iret_saved.rsp;
-    regs->ss     = iret_saved.ss | 3; /* force guest privilege */
-
-    if ( !(iret_saved.flags & VGCF_in_syscall) )
-    {
-        regs->entry_vector &= ~TRAP_syscall;
-        regs->r11 = iret_saved.r11;
-        regs->rcx = iret_saved.rcx;
-    }
-
-    /* Restore upcall mask from supplied EFLAGS.IF. */
-    vcpu_info(v, evtchn_upcall_mask) = !(iret_saved.rflags & X86_EFLAGS_IF);
-
-    async_exception_cleanup(v);
-
-    /* Saved %rax gets written back to regs->rax in entry.S. */
-    return iret_saved.rax;
-
- exit_and_crash:
-    domain_crash(v->domain);
-    return 0;
 }
 
 static unsigned int write_stub_trampoline(
@@ -421,204 +334,6 @@ void subarch_percpu_traps_init(void)
     wrmsrl(MSR_STAR, XEN_MSR_STAR);
     wrmsrl(MSR_SYSCALL_MASK, XEN_SYSCALL_MASK);
 }
-
-void init_int80_direct_trap(struct vcpu *v)
-{
-    struct trap_info *ti = &v->arch.pv_vcpu.trap_ctxt[0x80];
-    struct trap_bounce *tb = &v->arch.pv_vcpu.int80_bounce;
-
-    tb->flags = TBF_EXCEPTION;
-    tb->cs    = ti->cs;
-    tb->eip   = ti->address;
-
-    if ( null_trap_bounce(v, tb) )
-        tb->flags = 0;
-}
-
-static long register_guest_callback(struct callback_register *reg)
-{
-    long ret = 0;
-    struct vcpu *v = current;
-
-    if ( !is_canonical_address(reg->address) )
-        return -EINVAL;
-
-    switch ( reg->type )
-    {
-    case CALLBACKTYPE_event:
-        v->arch.pv_vcpu.event_callback_eip    = reg->address;
-        break;
-
-    case CALLBACKTYPE_failsafe:
-        v->arch.pv_vcpu.failsafe_callback_eip = reg->address;
-        if ( reg->flags & CALLBACKF_mask_events )
-            set_bit(_VGCF_failsafe_disables_events,
-                    &v->arch.vgc_flags);
-        else
-            clear_bit(_VGCF_failsafe_disables_events,
-                      &v->arch.vgc_flags);
-        break;
-
-    case CALLBACKTYPE_syscall:
-        v->arch.pv_vcpu.syscall_callback_eip  = reg->address;
-        if ( reg->flags & CALLBACKF_mask_events )
-            set_bit(_VGCF_syscall_disables_events,
-                    &v->arch.vgc_flags);
-        else
-            clear_bit(_VGCF_syscall_disables_events,
-                      &v->arch.vgc_flags);
-        break;
-
-    case CALLBACKTYPE_syscall32:
-        v->arch.pv_vcpu.syscall32_callback_eip = reg->address;
-        v->arch.pv_vcpu.syscall32_disables_events =
-            !!(reg->flags & CALLBACKF_mask_events);
-        break;
-
-    case CALLBACKTYPE_sysenter:
-        v->arch.pv_vcpu.sysenter_callback_eip = reg->address;
-        v->arch.pv_vcpu.sysenter_disables_events =
-            !!(reg->flags & CALLBACKF_mask_events);
-        break;
-
-    case CALLBACKTYPE_nmi:
-        ret = register_guest_nmi_callback(reg->address);
-        break;
-
-    default:
-        ret = -ENOSYS;
-        break;
-    }
-
-    return ret;
-}
-
-static long unregister_guest_callback(struct callback_unregister *unreg)
-{
-    long ret;
-
-    switch ( unreg->type )
-    {
-    case CALLBACKTYPE_event:
-    case CALLBACKTYPE_failsafe:
-    case CALLBACKTYPE_syscall:
-    case CALLBACKTYPE_syscall32:
-    case CALLBACKTYPE_sysenter:
-        ret = -EINVAL;
-        break;
-
-    case CALLBACKTYPE_nmi:
-        ret = unregister_guest_nmi_callback();
-        break;
-
-    default:
-        ret = -ENOSYS;
-        break;
-    }
-
-    return ret;
-}
-
-
-long do_callback_op(int cmd, XEN_GUEST_HANDLE_PARAM(const_void) arg)
-{
-    long ret;
-
-    switch ( cmd )
-    {
-    case CALLBACKOP_register:
-    {
-        struct callback_register reg;
-
-        ret = -EFAULT;
-        if ( copy_from_guest(&reg, arg, 1) )
-            break;
-
-        ret = register_guest_callback(&reg);
-    }
-    break;
-
-    case CALLBACKOP_unregister:
-    {
-        struct callback_unregister unreg;
-
-        ret = -EFAULT;
-        if ( copy_from_guest(&unreg, arg, 1) )
-            break;
-
-        ret = unregister_guest_callback(&unreg);
-    }
-    break;
-
-    default:
-        ret = -ENOSYS;
-        break;
-    }
-
-    return ret;
-}
-
-long do_set_callbacks(unsigned long event_address,
-                      unsigned long failsafe_address,
-                      unsigned long syscall_address)
-{
-    struct callback_register event = {
-        .type = CALLBACKTYPE_event,
-        .address = event_address,
-    };
-    struct callback_register failsafe = {
-        .type = CALLBACKTYPE_failsafe,
-        .address = failsafe_address,
-    };
-    struct callback_register syscall = {
-        .type = CALLBACKTYPE_syscall,
-        .address = syscall_address,
-    };
-
-    register_guest_callback(&event);
-    register_guest_callback(&failsafe);
-    register_guest_callback(&syscall);
-
-    return 0;
-}
-
-static void hypercall_page_initialise_ring3_kernel(void *hypercall_page)
-{
-    char *p;
-    int i;
-
-    /* Fill in all the transfer points with template machine code. */
-    for ( i = 0; i < (PAGE_SIZE / 32); i++ )
-    {
-        if ( i == __HYPERVISOR_iret )
-            continue;
-
-        p = (char *)(hypercall_page + (i * 32));
-        *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
-        *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
-        *(u8  *)(p+ 3) = 0xb8;    /* mov  $<i>,%eax */
-        *(u32 *)(p+ 4) = i;
-        *(u16 *)(p+ 8) = 0x050f;  /* syscall */
-        *(u16 *)(p+10) = 0x5b41;  /* pop  %r11 */
-        *(u8  *)(p+12) = 0x59;    /* pop  %rcx */
-        *(u8  *)(p+13) = 0xc3;    /* ret */
-    }
-
-    /*
-     * HYPERVISOR_iret is special because it doesn't return and expects a
-     * special stack frame. Guests jump at this transfer point instead of
-     * calling it.
-     */
-    p = (char *)(hypercall_page + (__HYPERVISOR_iret * 32));
-    *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
-    *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
-    *(u8  *)(p+ 3) = 0x50;    /* push %rax */
-    *(u8  *)(p+ 4) = 0xb8;    /* mov  $__HYPERVISOR_iret,%eax */
-    *(u32 *)(p+ 5) = __HYPERVISOR_iret;
-    *(u16 *)(p+ 9) = 0x050f;  /* syscall */
-}
-
-#include "compat/traps.c"
 
 void hypercall_page_initialise(struct domain *d, void *hypercall_page)
 {

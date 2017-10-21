@@ -209,6 +209,7 @@ struct p2m_domain {
      * to set it to any other value. */
 #define P2M_BASE_EADDR     (~0ULL)
     uint64_t           np2m_base;
+    uint64_t           np2m_generation;
 
     /* Nested p2ms: linked list of n2pms allocated to this domain. 
      * The host p2m hasolds the head of the list and the np2ms are 
@@ -359,16 +360,22 @@ struct p2m_domain {
 /* get host p2m table */
 #define p2m_get_hostp2m(d)      ((d)->arch.p2m)
 
-/* Get p2m table (re)usable for specified np2m base.
- * Automatically destroys and re-initializes a p2m if none found.
- * If np2m_base == 0 then v->arch.hvm_vcpu.guest_cr[3] is used.
+/*
+ * Updates vCPU's n2pm to match its np2m_base in VMCx12 and returns that np2m.
  */
-struct p2m_domain *p2m_get_nestedp2m(struct vcpu *v, uint64_t np2m_base);
+struct p2m_domain *p2m_get_nestedp2m(struct vcpu *v);
+/* Similar to the above except that returned p2m is still write-locked */
+struct p2m_domain *p2m_get_nestedp2m_locked(struct vcpu *v);
 
 /* If vcpu is in host mode then behaviour matches p2m_get_hostp2m().
  * If vcpu is in guest mode then behaviour matches p2m_get_nestedp2m().
  */
 struct p2m_domain *p2m_get_p2m(struct vcpu *v);
+
+#define NP2M_SCHEDLE_IN  0
+#define NP2M_SCHEDLE_OUT 1
+
+void np2m_schedule(int dir);
 
 static inline bool_t p2m_is_hostp2m(const struct p2m_domain *p2m)
 {
@@ -770,6 +777,8 @@ int p2m_pt_handle_deferred_changes(uint64_t gpa);
 void p2m_flush(struct vcpu *v, struct p2m_domain *p2m);
 /* Flushes all nested p2m tables */
 void p2m_flush_nestedp2m(struct domain *d);
+/* Flushes the np2m specified by np2m_base (if it exists) */
+void np2m_flush_base(struct vcpu *v, unsigned long np2m_base);
 
 void nestedp2m_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
     l1_pgentry_t *p, l1_pgentry_t new, unsigned int level);

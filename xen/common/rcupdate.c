@@ -110,10 +110,28 @@ struct rcu_data {
  * About how far in the future the timer should be programmed each time,
  * it's hard to tell (guess!!). Since this mimics Linux's periodic timer
  * tick, take values used there as an indication. In Linux 2.6.21, tick
- * period can be 10ms, 4ms, 3.33ms or 1ms. Let's use 10ms, to enable
- * at least some power saving on the CPU that is going idle.
+ * period can be 10ms, 4ms, 3.33ms or 1ms.
+ *
+ * By default, we use 10ms, to enable at least some power saving on the
+ * CPU that is going idle. The user can change this, via a boot time
+ * parameter, but only up to 100ms.
  */
-#define RCU_IDLE_TIMER_PERIOD MILLISECS(10)
+#define IDLE_TIMER_PERIOD_MAX     MILLISECS(100)
+#define IDLE_TIMER_PERIOD_DEFAULT MILLISECS(10)
+#define IDLE_TIMER_PERIOD_MIN     MICROSECS(100)
+
+static s_time_t __read_mostly idle_timer_period;
+
+/*
+ * Increment and decrement values for the idle timer handler. The algorithm
+ * works as follows:
+ * - if the timer actually fires, and it finds out that the grace period isn't
+ *   over yet, we add IDLE_TIMER_PERIOD_INCR to the timer's period;
+ * - if the timer actually fires and it finds the grace period over, we
+ *   subtract IDLE_TIMER_PERIOD_DECR from the timer's period.
+ */
+#define IDLE_TIMER_PERIOD_INCR    MILLISECS(10)
+#define IDLE_TIMER_PERIOD_DECR    MICROSECS(100)
 
 static DEFINE_PER_CPU(struct rcu_data, rcu_data);
 
@@ -453,7 +471,7 @@ void rcu_idle_timer_start()
     if (likely(!rdp->curlist))
         return;
 
-    set_timer(&rdp->idle_timer, NOW() + RCU_IDLE_TIMER_PERIOD);
+    set_timer(&rdp->idle_timer, NOW() + idle_timer_period);
     rdp->idle_timer_active = true;
 }
 
@@ -465,13 +483,36 @@ void rcu_idle_timer_stop()
         return;
 
     rdp->idle_timer_active = false;
-    stop_timer(&rdp->idle_timer);
+
+    /*
+     * In general, as the CPU is becoming active again, we don't need the
+     * idle timer, and so we want to stop it.
+     *
+     * However, in case we are here because idle_timer has (just) fired and
+     * has woken up the CPU, we skip stop_timer() now. In fact, when a CPU
+     * wakes up from idle, this code always runs before do_softirq() has the
+     * chance to check and deal with TIMER_SOFTIRQ. And if we stop the timer
+     * now, the TIMER_SOFTIRQ handler will see it as inactive, and will not
+     * call rcu_idle_timer_handler().
+     *
+     * Therefore, if we see that the timer is expired already, we leave it
+     * alone. The TIMER_SOFTIRQ handler will then run the timer routine, and
+     * deactivate it.
+     */
+    if ( !timer_is_expired(&rdp->idle_timer) )
+        stop_timer(&rdp->idle_timer);
 }
 
 static void rcu_idle_timer_handler(void* data)
 {
-    /* Nothing, really... Just count the number of times we fire */
     perfc_incr(rcu_idle_timer);
+
+    if ( !cpumask_empty(&rcu_ctrlblk.cpumask) )
+        idle_timer_period = min(idle_timer_period + IDLE_TIMER_PERIOD_INCR,
+                                IDLE_TIMER_PERIOD_MAX);
+    else
+        idle_timer_period = max(idle_timer_period - IDLE_TIMER_PERIOD_DECR,
+                                IDLE_TIMER_PERIOD_MIN);
 }
 
 void rcu_check_callbacks(int cpu)
@@ -554,6 +595,20 @@ static struct notifier_block cpu_nfb = {
 void __init rcu_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
+    static unsigned int __initdata idle_timer_period_ms =
+                                    IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
+    integer_param("rcu-idle-timer-period-ms", idle_timer_period_ms);
+
+    /* We don't allow 0, or anything higher than IDLE_TIMER_PERIOD_MAX */
+    if ( idle_timer_period_ms == 0 ||
+         idle_timer_period_ms > IDLE_TIMER_PERIOD_MAX / MILLISECS(1) )
+    {
+        idle_timer_period_ms = IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
+        printk("WARNING: rcu-idle-timer-period-ms outside of "
+               "(0,%"PRI_stime"]. Resetting it to %u.\n",
+               IDLE_TIMER_PERIOD_MAX / MILLISECS(1), idle_timer_period_ms);
+    }
+    idle_timer_period = MILLISECS(idle_timer_period_ms);
 
     cpumask_clear(&rcu_ctrlblk.idle_cpumask);
     cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);

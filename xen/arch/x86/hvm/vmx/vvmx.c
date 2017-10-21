@@ -1109,8 +1109,7 @@ static void load_shadow_guest_state(struct vcpu *v)
 
 uint64_t get_shadow_eptp(struct vcpu *v)
 {
-    uint64_t np2m_base = nvmx_vcpu_eptp_base(v);
-    struct p2m_domain *p2m = p2m_get_nestedp2m(v, np2m_base);
+    struct p2m_domain *p2m = p2m_get_nestedp2m(v);
     struct ept_data *ept = &p2m->ept;
 
     ept->mfn = pagetable_get_pfn(p2m_get_pagetable(p2m));
@@ -1202,6 +1201,7 @@ static void virtual_vmentry(struct cpu_user_regs *regs)
 
     /* Setup virtual ETP for L2 guest*/
     if ( nestedhvm_paging_mode_hap(v) )
+        /* This will setup the initial np2m for the nested vCPU */
         __vmwrite(EPT_POINTER, get_shadow_eptp(v));
     else
         __vmwrite(EPT_POINTER, get_host_eptp(v));
@@ -1368,6 +1368,9 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
          !(v->arch.hvm_vcpu.guest_efer & EFER_LMA) )
         shadow_to_vvmcs_bulk(v, ARRAY_SIZE(gpdpte_fields), gpdpte_fields);
 
+    /* This will clear current pCPU bit in p2m->dirty_cpumask */
+    np2m_schedule(NP2M_SCHEDLE_OUT);
+
     vmx_vmcs_switch(v->arch.hvm_vmx.vmcs_pa, nvcpu->nv_n1vmcx_pa);
 
     nestedhvm_vcpu_exit_guestmode(v);
@@ -1406,11 +1409,33 @@ static void virtual_vmexit(struct cpu_user_regs *regs)
     vmsucceed(regs);
 }
 
+static void nvmx_eptp_update(void)
+{
+    struct vcpu *curr = current;
+
+    if ( !nestedhvm_vcpu_in_guestmode(curr) ||
+          vcpu_nestedhvm(curr).nv_vmexit_pending ||
+         !vcpu_nestedhvm(curr).stale_np2m ||
+         !nestedhvm_paging_mode_hap(curr) )
+        return;
+
+    /*
+     * Interrupts are enabled here, so we need to clear stale_np2m
+     * before we do the vmwrite.  If we do it in the other order, an
+     * and IPI comes in changing the shadow eptp after the vmwrite,
+     * we'll complete the vmenter with a stale eptp value.
+     */
+    vcpu_nestedhvm(curr).stale_np2m = false;
+    __vmwrite(EPT_POINTER, get_shadow_eptp(curr));
+}
+
 void nvmx_switch_guest(void)
 {
     struct vcpu *v = current;
     struct nestedvcpu *nvcpu = &vcpu_nestedhvm(v);
     struct cpu_user_regs *regs = guest_cpu_user_regs();
+
+    nvmx_eptp_update();
 
     /*
      * A pending IO emulation may still be not finished. In this case, no
@@ -1910,12 +1935,7 @@ int nvmx_handle_invept(struct cpu_user_regs *regs)
     {
     case INVEPT_SINGLE_CONTEXT:
     {
-        struct p2m_domain *p2m = p2m_get_nestedp2m(current, eptp);
-        if ( p2m )
-        {
-            p2m_flush(current, p2m);
-            ept_sync_domain(p2m);
-        }
+        np2m_flush_base(current, eptp);
         break;
     }
     case INVEPT_ALL_CONTEXT:

@@ -22,52 +22,83 @@
 #define LPAE_SH_INNER         0x3
 
 /*
- * LPAE Memory region attributes. Indexed by the AttrIndex bits of a
- * LPAE entry; the 8-bit fields are packed little-endian into MAIR0 and MAIR1.
- *
- *                    ai    encoding
- *   MT_UNCACHED      000   0000 0000  -- Strongly Ordered
- *   MT_BUFFERABLE    001   0100 0100  -- Non-Cacheable
- *   MT_WRITETHROUGH  010   1010 1010  -- Write-through
- *   MT_WRITEBACK     011   1110 1110  -- Write-back
- *   MT_DEV_SHARED    100   0000 0100  -- Device
- *   ??               101
- *   reserved         110
- *   MT_WRITEALLOC    111   1111 1111  -- Write-back write-allocate
- */
-#define MAIR0VAL 0xeeaa4400
-#define MAIR1VAL 0xff000004
-#define MAIRVAL (MAIR0VAL|MAIR1VAL<<32)
-
-/*
  * Attribute Indexes.
  *
  * These are valid in the AttrIndx[2:0] field of an LPAE stage 1 page
  * table entry. They are indexes into the bytes of the MAIR*
- * registers, as defined above.
+ * registers, as defined below.
  *
  */
-#define MT_UNCACHED      0x0
-#define MT_BUFFERABLE    0x1
-#define MT_WRITETHROUGH  0x2
-#define MT_WRITEBACK     0x3
-#define MT_DEV_SHARED    0x4
-#define MT_WRITEALLOC    0x7
-
-#define PAGE_HYPERVISOR         (MT_WRITEALLOC)
-#define PAGE_HYPERVISOR_NOCACHE (MT_DEV_SHARED)
-#define PAGE_HYPERVISOR_WC      (MT_BUFFERABLE)
+#define MT_DEVICE_nGnRnE 0x0
+#define MT_NORMAL_NC     0x1
+#define MT_NORMAL_WT     0x2
+#define MT_NORMAL_WB     0x3
+#define MT_DEVICE_nGnRE  0x4
+#define MT_NORMAL        0x7
 
 /*
- * Defines for changing the hypervisor PTE .ro and .nx bits. This is only to be
- * used with modify_xen_mappings.
+ * LPAE Memory region attributes. Indexed by the AttrIndex bits of a
+ * LPAE entry; the 8-bit fields are packed little-endian into MAIR0 and MAIR1.
+ *
+ * See section "Device memory" B2.7.2 in ARM DDI 0487B.a for more
+ * details about the meaning of *G*R*E.
+ *
+ *                    ai    encoding
+ *   MT_DEVICE_nGnRnE 000   0000 0000  -- Strongly Ordered/Device nGnRnE
+ *   MT_NORMAL_NC     001   0100 0100  -- Non-Cacheable
+ *   MT_NORMAL_WT     010   1010 1010  -- Write-through
+ *   MT_NORMAL_WB     011   1110 1110  -- Write-back
+ *   MT_DEVICE_nGnRE  100   0000 0100  -- Device nGnRE
+ *   ??               101
+ *   reserved         110
+ *   MT_NORMAL        111   1111 1111  -- Write-back write-allocate
+ *
+ * /!\ It is not possible to combine the definition in MAIRVAL and then
+ * split because it would result to a 64-bit value that some assembler
+ * doesn't understand.
  */
-#define _PTE_NX_BIT     0U
-#define _PTE_RO_BIT     1U
-#define PTE_NX          (1U << _PTE_NX_BIT)
-#define PTE_RO          (1U << _PTE_RO_BIT)
-#define PTE_NX_MASK(x)  (((x) >> _PTE_NX_BIT) & 0x1U)
-#define PTE_RO_MASK(x)  (((x) >> _PTE_RO_BIT) & 0x1U)
+#define _MAIR0(attr, mt) (_AC(attr, ULL) << ((mt) * 8))
+#define _MAIR1(attr, mt) (_AC(attr, ULL) << (((mt) * 8) - 32))
+
+#define MAIR0VAL (_MAIR0(0x00, MT_DEVICE_nGnRnE)| \
+                  _MAIR0(0x44, MT_NORMAL_NC)    | \
+                  _MAIR0(0xaa, MT_NORMAL_WT)    | \
+                  _MAIR0(0xee, MT_NORMAL_WB))
+
+#define MAIR1VAL (_MAIR1(0x04, MT_DEVICE_nGnRE) | \
+                  _MAIR1(0xff, MT_NORMAL))
+
+#define MAIRVAL (MAIR1VAL << 32 | MAIR0VAL)
+
+/*
+ * Layout of the flags used for updating the hypervisor page tables
+ *
+ * [0:2] Memory Attribute Index
+ * [3:4] Permission flags
+ */
+#define PAGE_AI_MASK(x) ((x) & 0x7U)
+
+#define _PAGE_XN_BIT    3
+#define _PAGE_RO_BIT    4
+#define _PAGE_XN    (1U << _PAGE_XN_BIT)
+#define _PAGE_RO    (1U << _PAGE_RO_BIT)
+#define PAGE_XN_MASK(x) (((x) >> _PAGE_XN_BIT) & 0x1U)
+#define PAGE_RO_MASK(x) (((x) >> _PAGE_RO_BIT) & 0x1U)
+
+/*
+ * _PAGE_DEVICE and _PAGE_NORMAL are convenience defines. They are not
+ * meant to be used outside of this header.
+ */
+#define _PAGE_DEVICE    _PAGE_XN
+#define _PAGE_NORMAL    MT_NORMAL
+
+#define PAGE_HYPERVISOR_RO      (_PAGE_NORMAL|_PAGE_RO|_PAGE_XN)
+#define PAGE_HYPERVISOR_RX      (_PAGE_NORMAL|_PAGE_RO)
+#define PAGE_HYPERVISOR_RW      (_PAGE_NORMAL|_PAGE_XN)
+
+#define PAGE_HYPERVISOR         PAGE_HYPERVISOR_RW
+#define PAGE_HYPERVISOR_NOCACHE (_PAGE_DEVICE|MT_DEVICE_nGnRE)
+#define PAGE_HYPERVISOR_WC      (_PAGE_DEVICE|MT_NORMAL_NC)
 
 /*
  * Stage 2 Memory Type.

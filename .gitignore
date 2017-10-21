@@ -73,6 +73,7 @@ stubdom/libxencall-*
 stubdom/libxenevtchn-*
 stubdom/libxenforeignmemory-*
 stubdom/libxengnttab-*
+stubdom/libxentoolcore-*
 stubdom/libxentoollog-*
 stubdom/lwip-*
 stubdom/lwip/
@@ -98,6 +99,8 @@ tools/config.cache
 config/Tools.mk
 config/Stubdom.mk
 config/Docs.mk
+tools/libs/toolcore/headers.chk
+tools/libs/toolcore/xentoolcore.pc
 tools/libs/toollog/headers.chk
 tools/libs/toollog/xentoollog.pc
 tools/libs/evtchn/headers.chk
@@ -160,8 +163,10 @@ tools/flask/utils/flask-set-bool
 tools/flask/utils/flask-label-pci
 tools/fuzz/libelf/afl-libelf-fuzzer
 tools/fuzz/x86_instruction_emulator/asm
-tools/fuzz/x86_instruction_emulator/x86_emulate*
+tools/fuzz/x86_instruction_emulator/x86_emulate
+tools/fuzz/x86_instruction_emulator/x86-emulate.[ch]
 tools/fuzz/x86_instruction_emulator/afl-harness
+tools/fuzz/x86_instruction_emulator/afl-harness-cov
 tools/helpers/_paths.h
 tools/helpers/init-xenstore-domain
 tools/helpers/xen-init-dom0
@@ -228,7 +233,7 @@ tools/security/xensec_tool
 tools/tests/x86_emulator/*.bin
 tools/tests/x86_emulator/*.tmp
 tools/tests/x86_emulator/asm
-tools/tests/x86_emulator/avx*.h
+tools/tests/x86_emulator/avx*.[ch]
 tools/tests/x86_emulator/blowfish.h
 tools/tests/x86_emulator/sse*.[ch]
 tools/tests/x86_emulator/test_x86_emulator
@@ -352,6 +357,7 @@ tools/include/xen-foreign/arm64.h
 .git
 tools/misc/xen-hptool
 tools/misc/xen-mfndump
+tools/libs/toolcore/include/_*.h
 tools/libxc/_*.[ch]
 tools/libxl/_*.[ch]
 tools/libxl/testidl

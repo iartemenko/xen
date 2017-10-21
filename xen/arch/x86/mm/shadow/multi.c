@@ -1485,25 +1485,37 @@ void sh_install_xen_entries_in_l4(struct domain *d, mfn_t gl4mfn, mfn_t sl4mfn)
         sl4e[shadow_l4_table_offset(RO_MPT_VIRT_START)] = shadow_l4e_empty();
     }
 
-    /* Shadow linear mapping for 4-level shadows.  N.B. for 3-level
-     * shadows on 64-bit xen, this linear mapping is later replaced by the
-     * monitor pagetable structure, which is built in make_monitor_table
-     * and maintained by sh_update_linear_entries. */
-    sl4e[shadow_l4_table_offset(SH_LINEAR_PT_VIRT_START)] =
-        shadow_l4e_from_mfn(sl4mfn, __PAGE_HYPERVISOR_RW);
-
-    /* Self linear mapping.  */
-    if ( shadow_mode_translate(d) && !shadow_mode_external(d) )
+    /*
+     * Linear mapping slots:
+     *
+     * Calling this function with gl4mfn == sl4mfn is used to construct a
+     * monitor table for translated domains.  In this case, gl4mfn forms the
+     * self-linear mapping (i.e. not pointing into the translated domain), and
+     * the shadow-linear slot is skipped.  The shadow-linear slot is either
+     * filled when constructing lower level monitor tables, or via
+     * sh_update_cr3() for 4-level guests.
+     *
+     * Calling this function with gl4mfn != sl4mfn is used for non-translated
+     * guests, where the shadow-linear slot is actually self-linear, and the
+     * guest-linear slot points into the guests view of its pagetables.
+     */
+    if ( shadow_mode_translate(d) )
     {
-        // linear tables may not be used with translated PV guests
-        sl4e[shadow_l4_table_offset(LINEAR_PT_VIRT_START)] =
+        ASSERT(mfn_eq(gl4mfn, sl4mfn));
+
+        sl4e[shadow_l4_table_offset(SH_LINEAR_PT_VIRT_START)] =
             shadow_l4e_empty();
     }
     else
     {
-        sl4e[shadow_l4_table_offset(LINEAR_PT_VIRT_START)] =
-            shadow_l4e_from_mfn(gl4mfn, __PAGE_HYPERVISOR_RW);
+        ASSERT(!mfn_eq(gl4mfn, sl4mfn));
+
+        sl4e[shadow_l4_table_offset(SH_LINEAR_PT_VIRT_START)] =
+            shadow_l4e_from_mfn(sl4mfn, __PAGE_HYPERVISOR_RW);
     }
+
+    sl4e[shadow_l4_table_offset(LINEAR_PT_VIRT_START)] =
+        shadow_l4e_from_mfn(gl4mfn, __PAGE_HYPERVISOR_RW);
 
     unmap_domain_page(sl4e);
 }
@@ -2425,7 +2437,7 @@ int sh_safe_not_to_sync(struct vcpu *v, mfn_t gl1mfn)
     sp = mfn_to_page(smfn);
     if ( sp->u.sh.count != 1 || !sp->up )
         return 0;
-    smfn = _mfn(sp->up >> PAGE_SHIFT);
+    smfn = maddr_to_mfn(sp->up);
     ASSERT(mfn_valid(smfn));
 
 #if (SHADOW_PAGING_LEVELS == 4)
@@ -2434,7 +2446,7 @@ int sh_safe_not_to_sync(struct vcpu *v, mfn_t gl1mfn)
     ASSERT(sh_type_has_up_pointer(d, SH_type_l2_shadow));
     if ( sp->u.sh.count != 1 || !sp->up )
         return 0;
-    smfn = _mfn(sp->up >> PAGE_SHIFT);
+    smfn = maddr_to_mfn(sp->up);
     ASSERT(mfn_valid(smfn));
 
     /* up to l4 */
@@ -2442,7 +2454,7 @@ int sh_safe_not_to_sync(struct vcpu *v, mfn_t gl1mfn)
     if ( sp->u.sh.count != 1
          || !sh_type_has_up_pointer(d, SH_type_l3_64_shadow) || !sp->up )
         return 0;
-    smfn = _mfn(sp->up >> PAGE_SHIFT);
+    smfn = maddr_to_mfn(sp->up);
     ASSERT(mfn_valid(smfn));
 #endif
 
@@ -3391,7 +3403,8 @@ static int sh_page_fault(struct vcpu *v,
             int i;
             for ( i = 0; i < 4; i++ )
             {
-                mfn_t smfn = _mfn(pagetable_get_pfn(v->arch.shadow_table[i]));
+                mfn_t smfn = pagetable_get_mfn(v->arch.shadow_table[i]);
+
                 if ( mfn_valid(smfn) && (mfn_x(smfn) != 0) )
                 {
                     used |= (mfn_to_page(smfn)->v.sh.back == mfn_x(gmfn));
@@ -4405,6 +4418,11 @@ static int sh_guess_wrmap(struct vcpu *v, unsigned long vaddr, mfn_t gmfn)
 
     /* Carefully look in the shadow linear map for the l1e we expect */
 #if SHADOW_PAGING_LEVELS >= 4
+    /* Is a shadow linear map is installed in the first place? */
+    sl4p  = v->arch.paging.shadow.guest_vtable;
+    sl4p += shadow_l4_table_offset(SH_LINEAR_PT_VIRT_START);
+    if ( !(shadow_l4e_get_flags(*sl4p) & _PAGE_PRESENT) )
+        return 0;
     sl4p = sh_linear_l4_table(v) + shadow_l4_linear_offset(vaddr);
     if ( !(shadow_l4e_get_flags(*sl4p) & _PAGE_PRESENT) )
         return 0;
@@ -4645,7 +4663,7 @@ static void sh_pagetable_dying(struct vcpu *v, paddr_t gpa)
             if ( pagetable_is_null(v->arch.shadow_table[i]) )
                 smfn = INVALID_MFN;
             else
-                smfn = _mfn(pagetable_get_pfn(v->arch.shadow_table[i]));
+                smfn = pagetable_get_mfn(v->arch.shadow_table[i]);
         }
         else
         {

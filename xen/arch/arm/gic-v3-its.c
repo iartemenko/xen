@@ -18,8 +18,10 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/acpi.h>
 #include <xen/lib.h>
 #include <xen/delay.h>
+#include <xen/iocap.h>
 #include <xen/libfdt/libfdt.h>
 #include <xen/mm.h>
 #include <xen/rbtree.h>
@@ -904,6 +906,27 @@ struct pending_irq *gicv3_assign_guest_event(struct domain *d,
     return pirq;
 }
 
+int gicv3_its_deny_access(const struct domain *d)
+{
+    int rc = 0;
+    unsigned long mfn, nr;
+    const struct host_its *its_data;
+
+    list_for_each_entry( its_data, &host_its_list, entry )
+    {
+        mfn = paddr_to_pfn(its_data->addr);
+        nr = PFN_UP(its_data->size);
+        rc = iomem_deny_access(d, mfn, mfn + nr);
+        if ( rc )
+        {
+            printk("iomem_deny_access failed for %lx:%lx \r\n", mfn, nr);
+            break;
+        }
+    }
+
+    return rc;
+}
+
 /*
  * Create the respective guest DT nodes from a list of host ITSes.
  * This copies the reg property, so the guest sees the ITS at the same address
@@ -976,11 +999,29 @@ int gicv3_its_make_hwdom_dt_nodes(const struct domain *d,
     return res;
 }
 
+/* Common function for adding to host_its_list */
+static void add_to_host_its_list(paddr_t addr, paddr_t size,
+                                 const struct dt_device_node *node)
+{
+    struct host_its *its_data;
+
+    its_data = xzalloc(struct host_its);
+    if ( !its_data )
+        panic("GICv3: Cannot allocate memory for ITS frame");
+
+    its_data->addr = addr;
+    its_data->size = size;
+    its_data->dt_node = node;
+
+    printk("GICv3: Found ITS @0x%lx\n", addr);
+
+    list_add_tail(&its_data->entry, &host_its_list);
+}
+
 /* Scan the DT for any ITS nodes and create a list of host ITSes out of it. */
 void gicv3_its_dt_init(const struct dt_device_node *node)
 {
     const struct dt_device_node *its = NULL;
-    struct host_its *its_data;
 
     /*
      * Check for ITS MSI subnodes. If any, add the ITS register
@@ -996,19 +1037,51 @@ void gicv3_its_dt_init(const struct dt_device_node *node)
         if ( dt_device_get_address(its, 0, &addr, &size) )
             panic("GICv3: Cannot find a valid ITS frame address");
 
-        its_data = xzalloc(struct host_its);
-        if ( !its_data )
-            panic("GICv3: Cannot allocate memory for ITS frame");
-
-        its_data->addr = addr;
-        its_data->size = size;
-        its_data->dt_node = its;
-
-        printk("GICv3: Found ITS @0x%lx\n", addr);
-
-        list_add_tail(&its_data->entry, &host_its_list);
+        add_to_host_its_list(addr, size, its);
     }
 }
+
+#ifdef CONFIG_ACPI
+static int gicv3_its_acpi_probe(struct acpi_subtable_header *header,
+                                const unsigned long end)
+{
+    struct acpi_madt_generic_translator *its;
+
+    its = (struct acpi_madt_generic_translator *)header;
+    if ( BAD_MADT_ENTRY(its, end) )
+        return -EINVAL;
+
+    add_to_host_its_list(its->base_address, GICV3_ITS_SIZE, NULL);
+
+    return 0;
+}
+
+void gicv3_its_acpi_init(void)
+{
+    /* Parse ITS information */
+    acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_TRANSLATOR,
+                          gicv3_its_acpi_probe, 0);
+}
+
+unsigned long gicv3_its_make_hwdom_madt(const struct domain *d, void *base_ptr)
+{
+    unsigned int i;
+    void *fw_its;
+    struct acpi_madt_generic_translator *hwdom_its;
+
+    hwdom_its = base_ptr;
+
+    for ( i = 0; i < vgic_v3_its_count(d); i++ )
+    {
+        fw_its = acpi_table_get_entry_madt(ACPI_MADT_TYPE_GENERIC_TRANSLATOR,
+                                           i);
+        memcpy(hwdom_its, fw_its, sizeof(struct acpi_madt_generic_translator));
+        hwdom_its++;
+    }
+
+    return sizeof(struct acpi_madt_generic_translator) * vgic_v3_its_count(d);
+}
+#endif
 
 /*
  * Local variables:

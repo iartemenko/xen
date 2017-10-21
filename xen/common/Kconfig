@@ -32,6 +32,9 @@ config HAS_MEM_SHARING
 config HAS_PDX
 	bool
 
+config HAS_UBSAN
+	bool
+
 config HAS_KEXEC
 	bool
 
@@ -226,8 +229,8 @@ config CRYPTO
 	bool
 
 config LIVEPATCH
-	bool "Live patching support (TECH PREVIEW)"
-	default n
+	bool "Live patching support"
+	default X86
 	depends on HAS_BUILD_ID = "y"
 	---help---
 	  Allows a running Xen hypervisor to be dynamically patched using

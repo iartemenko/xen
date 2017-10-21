@@ -749,6 +749,10 @@ static int libxl__build_dom(libxl__gc *gc, uint32_t domid,
         LOGE(ERROR, "xc_dom_gnttab_init failed");
         goto out;
     }
+    if ((ret = libxl__arch_build_dom_finish(gc, info, dom, state)) != 0) {
+        LOGE(ERROR, "libxl__arch_build_dom_finish failed");
+        goto out;
+    }
 
 out:
     return ret != 0 ? ERROR_FAIL : 0;
@@ -850,6 +854,7 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
     if (xc_dom_translated(dom)) {
         state->console_mfn = dom->console_pfn;
         state->store_mfn = dom->xenstore_pfn;
+        state->vuart_gfn = dom->vuart_gfn;
     } else {
         state->console_mfn = xc_dom_p2m(dom, dom->console_pfn);
         state->store_mfn = xc_dom_p2m(dom, dom->xenstore_pfn);

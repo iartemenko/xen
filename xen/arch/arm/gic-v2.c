@@ -1012,6 +1012,11 @@ static int gicv2_iomem_deny_access(const struct domain *d)
     return iomem_deny_access(d, mfn, mfn + nr);
 }
 
+static unsigned long gicv2_get_hwdom_extra_madt_size(const struct domain *d)
+{
+    return 0;
+}
+
 #ifdef CONFIG_ACPI
 static int gicv2_make_hwdom_madt(const struct domain *d, u32 offset)
 {
@@ -1034,7 +1039,7 @@ static int gicv2_make_hwdom_madt(const struct domain *d, u32 offset)
     for ( i = 0; i < d->max_vcpus; i++ )
     {
         gicc = (struct acpi_madt_generic_interrupt *)(base_ptr + table_len);
-        ACPI_MEMCPY(gicc, host_gicc, size);
+        memcpy(gicc, host_gicc, size);
         gicc->cpu_interface_number = i;
         gicc->uid = i;
         gicc->flags = ACPI_MADT_ENABLED;
@@ -1248,6 +1253,7 @@ const static struct gic_hw_operations gicv2_ops = {
     .read_apr            = gicv2_read_apr,
     .make_hwdom_dt_node  = gicv2_make_hwdom_dt_node,
     .make_hwdom_madt     = gicv2_make_hwdom_madt,
+    .get_hwdom_extra_madt_size = gicv2_get_hwdom_extra_madt_size,
     .map_hwdom_extra_mappings = gicv2_map_hwdown_extra_mappings,
     .iomem_deny_access   = gicv2_iomem_deny_access,
     .do_LPI              = gicv2_do_LPI,

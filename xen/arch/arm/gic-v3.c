@@ -1308,6 +1308,10 @@ static int gicv3_iomem_deny_access(const struct domain *d)
     if ( rc )
         return rc;
 
+    rc = gicv3_its_deny_access(d);
+    if ( rc )
+        return rc;
+
     for ( i = 0; i < gicv3.rdist_count; i++ )
     {
         mfn = gicv3.rdist_regions[i].base >> PAGE_SHIFT;
@@ -1374,7 +1378,7 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
     for ( i = 0; i < d->max_vcpus; i++ )
     {
         gicc = (struct acpi_madt_generic_interrupt *)(base_ptr + table_len);
-        ACPI_MEMCPY(gicc, host_gicc, size);
+        memcpy(gicc, host_gicc, size);
         gicc->cpu_interface_number = i;
         gicc->uid = i;
         gicc->flags = ACPI_MADT_ENABLED;
@@ -1400,7 +1404,22 @@ static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
         table_len += size;
     }
 
+    table_len += gicv3_its_make_hwdom_madt(d, base_ptr + table_len);
+
     return table_len;
+}
+
+static unsigned long gicv3_get_hwdom_extra_madt_size(const struct domain *d)
+{
+    unsigned long size;
+
+    size = sizeof(struct acpi_madt_generic_redistributor)
+           * d->arch.vgic.nr_regions;
+
+    size += sizeof(struct acpi_madt_generic_translator)
+            * vgic_v3_its_count(d);
+
+    return size;
 }
 
 static int __init
@@ -1567,6 +1586,8 @@ static void __init gicv3_acpi_init(void)
 
     gicv3.rdist_stride = 0;
 
+    gicv3_its_acpi_init();
+
     /*
      * In ACPI, 0 is considered as the invalid address. However the rest
      * of the initialization rely on the invalid address to be
@@ -1589,6 +1610,11 @@ static void __init gicv3_acpi_init(void)
 #else
 static void __init gicv3_acpi_init(void) { }
 static int gicv3_make_hwdom_madt(const struct domain *d, u32 offset)
+{
+    return 0;
+}
+
+static unsigned long gicv3_get_hwdom_extra_madt_size(const struct domain *d)
 {
     return 0;
 }
@@ -1693,6 +1719,7 @@ static const struct gic_hw_operations gicv3_ops = {
     .secondary_init      = gicv3_secondary_cpu_init,
     .make_hwdom_dt_node  = gicv3_make_hwdom_dt_node,
     .make_hwdom_madt     = gicv3_make_hwdom_madt,
+    .get_hwdom_extra_madt_size = gicv3_get_hwdom_extra_madt_size,
     .iomem_deny_access   = gicv3_iomem_deny_access,
     .do_LPI              = gicv3_do_LPI,
 };

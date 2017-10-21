@@ -131,7 +131,7 @@ static int hvmemul_do_io(
         .count = *reps,
         .dir = dir,
         .df = df,
-        .data = data,
+        .data = data_is_addr ? data : 0,
         .data_is_ptr = data_is_addr, /* ioreq_t field name is misleading */
         .state = STATE_IOREQ_READY,
     };
@@ -507,6 +507,159 @@ static int hvmemul_do_mmio_addr(paddr_t mmio_gpa,
                                 paddr_t ram_gpa)
 {
     return hvmemul_do_io_addr(1, mmio_gpa, reps, size, dir, df, ram_gpa);
+}
+
+/*
+ * Map the frame(s) covering an individual linear access, for writeable
+ * access.  May return NULL for MMIO, or ERR_PTR(~X86EMUL_*) for other errors
+ * including ERR_PTR(~X86EMUL_OKAY) for write-discard mappings.
+ *
+ * In debug builds, map() checks that each slot in hvmemul_ctxt->mfn[] is
+ * clean before use, and poisions unused slots with INVALID_MFN.
+ */
+static void *hvmemul_map_linear_addr(
+    unsigned long linear, unsigned int bytes, uint32_t pfec,
+    struct hvm_emulate_ctxt *hvmemul_ctxt)
+{
+    struct vcpu *curr = current;
+    void *err, *mapping;
+    unsigned int nr_frames = ((linear + bytes - !!bytes) >> PAGE_SHIFT) -
+        (linear >> PAGE_SHIFT) + 1;
+    unsigned int i;
+
+    /*
+     * mfn points to the next free slot.  All used slots have a page reference
+     * held on them.
+     */
+    mfn_t *mfn = &hvmemul_ctxt->mfn[0];
+
+    /*
+     * The caller has no legitimate reason for trying a zero-byte write, but
+     * all other code here is written to work if the check below was dropped.
+     *
+     * The maximum write size depends on the number of adjacent mfns[] which
+     * can be vmap()'d, accouting for possible misalignment within the region.
+     * The higher level emulation callers are responsible for ensuring that
+     * mfns[] is large enough for the requested write size.
+     */
+    if ( bytes == 0 ||
+         nr_frames > ARRAY_SIZE(hvmemul_ctxt->mfn) )
+    {
+        ASSERT_UNREACHABLE();
+        goto unhandleable;
+    }
+
+    for ( i = 0; i < nr_frames; i++ )
+    {
+        enum hvm_translation_result res;
+        struct page_info *page;
+        pagefault_info_t pfinfo;
+        p2m_type_t p2mt;
+        unsigned long addr = i ? (linear + (i << PAGE_SHIFT)) & PAGE_MASK : linear;
+
+        if ( hvmemul_ctxt->ctxt.addr_size < 64 )
+            addr = (uint32_t)addr;
+
+        /* Error checking.  Confirm that the current slot is clean. */
+        ASSERT(mfn_x(*mfn) == 0);
+
+        res = hvm_translate_get_page(curr, addr, true, pfec,
+                                     &pfinfo, &page, NULL, &p2mt);
+
+        switch ( res )
+        {
+        case HVMTRANS_okay:
+            break;
+
+        case HVMTRANS_bad_linear_to_gfn:
+            ASSERT(pfinfo.linear == addr);
+            x86_emul_pagefault(pfinfo.ec, pfinfo.linear, &hvmemul_ctxt->ctxt);
+            err = ERR_PTR(~X86EMUL_EXCEPTION);
+            goto out;
+
+        case HVMTRANS_bad_gfn_to_mfn:
+            err = NULL;
+            goto out;
+
+        case HVMTRANS_gfn_paged_out:
+        case HVMTRANS_gfn_shared:
+            err = ERR_PTR(~X86EMUL_RETRY);
+            goto out;
+
+        default:
+            goto unhandleable;
+        }
+
+        *mfn++ = _mfn(page_to_mfn(page));
+
+        if ( p2m_is_discard_write(p2mt) )
+        {
+            err = ERR_PTR(~X86EMUL_OKAY);
+            goto out;
+        }
+    }
+
+    /* Entire access within a single frame? */
+    if ( nr_frames == 1 )
+        mapping = map_domain_page(hvmemul_ctxt->mfn[0]);
+    /* Multiple frames? Need to vmap(). */
+    else if ( (mapping = vmap(hvmemul_ctxt->mfn,
+                              nr_frames)) == NULL )
+        goto unhandleable;
+
+#ifndef NDEBUG /* Poision unused mfn[]s with INVALID_MFN. */
+    while ( mfn < hvmemul_ctxt->mfn + ARRAY_SIZE(hvmemul_ctxt->mfn) )
+    {
+        ASSERT(mfn_x(*mfn) == 0);
+        *mfn++ = INVALID_MFN;
+    }
+#endif
+    return mapping + (linear & ~PAGE_MASK);
+
+ unhandleable:
+    err = ERR_PTR(~X86EMUL_UNHANDLEABLE);
+
+ out:
+    /* Drop all held references. */
+    while ( mfn-- > hvmemul_ctxt->mfn )
+        put_page(mfn_to_page(mfn_x(*mfn)));
+
+    return err;
+}
+
+static void hvmemul_unmap_linear_addr(
+    void *mapping, unsigned long linear, unsigned int bytes,
+    struct hvm_emulate_ctxt *hvmemul_ctxt)
+{
+    struct domain *currd = current->domain;
+    unsigned int nr_frames = ((linear + bytes - !!bytes) >> PAGE_SHIFT) -
+        (linear >> PAGE_SHIFT) + 1;
+    unsigned int i;
+    mfn_t *mfn = &hvmemul_ctxt->mfn[0];
+
+    ASSERT(bytes > 0);
+
+    if ( nr_frames == 1 )
+        unmap_domain_page(mapping);
+    else
+        vunmap(mapping);
+
+    for ( i = 0; i < nr_frames; i++ )
+    {
+        ASSERT(mfn_valid(*mfn));
+        paging_mark_dirty(currd, *mfn);
+        put_page(mfn_to_page(mfn_x(*mfn)));
+
+        *mfn++ = _mfn(0); /* Clean slot for map()'s error checking. */
+    }
+
+#ifndef NDEBUG /* Check (and clean) all unused mfns. */
+    while ( mfn < hvmemul_ctxt->mfn + ARRAY_SIZE(hvmemul_ctxt->mfn) )
+    {
+        ASSERT(mfn_eq(*mfn, INVALID_MFN));
+        *mfn++ = _mfn(0);
+    }
+#endif
 }
 
 /*
@@ -1000,11 +1153,11 @@ static int hvmemul_write(
     struct hvm_emulate_ctxt *hvmemul_ctxt =
         container_of(ctxt, struct hvm_emulate_ctxt, ctxt);
     struct vcpu *curr = current;
-    pagefault_info_t pfinfo;
     unsigned long addr, reps = 1;
     uint32_t pfec = PFEC_page_present | PFEC_write_access;
     struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
     int rc;
+    void *mapping;
 
     if ( is_x86_system_segment(seg) )
         pfec |= PFEC_implicit;
@@ -1020,23 +1173,16 @@ static int hvmemul_write(
          (vio->mmio_gla == (addr & PAGE_MASK)) )
         return hvmemul_linear_mmio_write(addr, bytes, p_data, pfec, hvmemul_ctxt, 1);
 
-    rc = hvm_copy_to_guest_linear(addr, p_data, bytes, pfec, &pfinfo);
+    mapping = hvmemul_map_linear_addr(addr, bytes, pfec, hvmemul_ctxt);
+    if ( IS_ERR(mapping) )
+        return ~PTR_ERR(mapping);
 
-    switch ( rc )
-    {
-    case HVMTRANS_okay:
-        break;
-    case HVMTRANS_bad_linear_to_gfn:
-        x86_emul_pagefault(pfinfo.ec, pfinfo.linear, &hvmemul_ctxt->ctxt);
-        return X86EMUL_EXCEPTION;
-    case HVMTRANS_bad_gfn_to_mfn:
+    if ( !mapping )
         return hvmemul_linear_mmio_write(addr, bytes, p_data, pfec, hvmemul_ctxt, 0);
-    case HVMTRANS_gfn_paged_out:
-    case HVMTRANS_gfn_shared:
-        return X86EMUL_RETRY;
-    default:
-        return X86EMUL_UNHANDLEABLE;
-    }
+
+    memcpy(mapping, p_data, bytes);
+
+    hvmemul_unmap_linear_addr(mapping, addr, bytes, hvmemul_ctxt);
 
     return X86EMUL_OKAY;
 }

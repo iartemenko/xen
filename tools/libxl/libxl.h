@@ -257,6 +257,12 @@
 #define LIBXL_HAVE_SCHED_RTDS_VCPU_PARAMS 1
 
 /*
+ * LIBXL_HAVE_SCHED_RTDS_VCPU_EXTRA indicates RTDS scheduler
+ * now supports per-vcpu extratime settings.
+ */
+#define LIBXL_HAVE_SCHED_RTDS_VCPU_EXTRA 1
+
+/*
  * libxl_domain_build_info has the arm.gic_version field.
  */
 #define LIBXL_HAVE_BUILDINFO_ARM_GIC_VERSION 1
@@ -311,10 +317,19 @@
 #define LIBXL_HAVE_P9S 1
 
 /*
+ * LIBXL_HAVE_BUILDINFO_ARM_VUART indicates that the toolstack supports virtual UART
+ * for ARM.
+ */
+#define LIBXL_HAVE_BUILDINFO_ARM_VUART 1
+
+/*
  * LIBXL_HAVE_BUILDINFO_GRANT_LIMITS indicates that libxl_domain_build_info
  * has the max_grant_frames and max_maptrack_frames fields.
  */
 #define LIBXL_HAVE_BUILDINFO_GRANT_LIMITS 1
+
+#define LIBXL_MAX_GRANT_FRAMES_DEFAULT 32
+#define LIBXL_MAX_MAPTRACK_FRAMES_DEFAULT 1024
 
 /*
  * LIBXL_HAVE_BUILDINFO_* indicates that libxl_domain_build_info has

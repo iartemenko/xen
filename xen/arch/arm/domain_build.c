@@ -1582,7 +1582,7 @@ static int acpi_create_rsdp(struct domain *d, struct membank tbl_add[])
     rsdp = acpi_os_map_memory(addr, table_size);
     base_ptr = d->arch.efi_acpi_table
                + acpi_get_table_offset(tbl_add, TBL_RSDP);
-    ACPI_MEMCPY(base_ptr, rsdp, table_size);
+    memcpy(base_ptr, rsdp, table_size);
     acpi_os_unmap_memory(rsdp, table_size);
 
     rsdp = (struct acpi_table_rsdp *)base_ptr;
@@ -1644,7 +1644,7 @@ static int acpi_create_xsdt(struct domain *d, struct membank tbl_add[])
                   / sizeof(u64);
     base_ptr = d->arch.efi_acpi_table
                + acpi_get_table_offset(tbl_add, TBL_XSDT);
-    ACPI_MEMCPY(base_ptr, table, table->length);
+    memcpy(base_ptr, table, table->length);
     acpi_os_unmap_memory(table, sizeof(struct acpi_table_header));
     acpi_os_unmap_memory(rsdp_tbl, sizeof(struct acpi_table_rsdp));
 
@@ -1687,10 +1687,10 @@ static int acpi_create_stao(struct domain *d, struct membank tbl_add[])
     }
 
     base_ptr = d->arch.efi_acpi_table + offset;
-    ACPI_MEMCPY(base_ptr, table, sizeof(struct acpi_table_header));
+    memcpy(base_ptr, table, sizeof(struct acpi_table_header));
 
     stao = (struct acpi_table_stao *)base_ptr;
-    ACPI_MEMCPY(stao->header.signature, ACPI_SIG_STAO, 4);
+    memcpy(stao->header.signature, ACPI_SIG_STAO, 4);
     stao->header.revision = 1;
     stao->header.length = table_size;
     stao->ignore_uart = 1;
@@ -1726,7 +1726,7 @@ static int acpi_create_madt(struct domain *d, struct membank tbl_add[])
     }
 
     base_ptr = d->arch.efi_acpi_table + offset;
-    ACPI_MEMCPY(base_ptr, table, table_size);
+    memcpy(base_ptr, table, table_size);
 
     /* Add Generic Distributor. */
     header = acpi_table_get_entry_madt(ACPI_MADT_TYPE_GENERIC_DISTRIBUTOR, 0);
@@ -1736,7 +1736,7 @@ static int acpi_create_madt(struct domain *d, struct membank tbl_add[])
         return -EINVAL;
     }
     gicd = container_of(header, struct acpi_madt_generic_distributor, header);
-    ACPI_MEMCPY(base_ptr + table_size, gicd,
+    memcpy(base_ptr + table_size, gicd,
                 sizeof(struct acpi_madt_generic_distributor));
     table_size += sizeof(struct acpi_madt_generic_distributor);
 
@@ -1782,7 +1782,7 @@ static int acpi_create_fadt(struct domain *d, struct membank tbl_add[])
     table_size = table->length;
     base_ptr = d->arch.efi_acpi_table
                + acpi_get_table_offset(tbl_add, TBL_FADT);
-    ACPI_MEMCPY(base_ptr, table, table_size);
+    memcpy(base_ptr, table, table_size);
     fadt = (struct acpi_table_fadt *)base_ptr;
 
     /* Set PSCI_COMPLIANT and PSCI_USE_HVC */
@@ -1809,12 +1809,7 @@ static int estimate_acpi_efi_size(struct domain *d, struct kernel_info *kinfo)
     acpi_size = ROUNDUP(sizeof(struct acpi_table_fadt), 8);
     acpi_size += ROUNDUP(sizeof(struct acpi_table_stao), 8);
 
-    madt_size = sizeof(struct acpi_table_madt)
-                + sizeof(struct acpi_madt_generic_interrupt) * d->max_vcpus
-                + sizeof(struct acpi_madt_generic_distributor);
-    if ( d->arch.vgic.version == GIC_V3 )
-        madt_size += sizeof(struct acpi_madt_generic_redistributor)
-                     * d->arch.vgic.nr_regions;
+    madt_size = gic_get_hwdom_madt_size(d);
     acpi_size += ROUNDUP(madt_size, 8);
 
     addr = acpi_os_get_root_pointer();
@@ -2095,11 +2090,7 @@ static void __init find_gnttab_region(struct domain *d,
      * enough space for a large grant table
      */
     kinfo->gnttab_start = __pa(_stext);
-    kinfo->gnttab_size = (_etext - _stext) & PAGE_MASK;
-
-    /* Make sure the grant table will fit in the region */
-    if ( (kinfo->gnttab_size >> PAGE_SHIFT) < max_grant_frames )
-        panic("Cannot find a space for the grant table region\n");
+    kinfo->gnttab_size = gnttab_dom0_frames() << PAGE_SHIFT;
 
 #ifdef CONFIG_ARM_32
     /*

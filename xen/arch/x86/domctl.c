@@ -1530,8 +1530,6 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
     bool compat = is_pv_32bit_domain(d);
 #define c(fld) (!compat ? (c.nat->fld) : (c.cmp->fld))
 
-    if ( !is_pv_domain(d) )
-        memset(c.nat, 0, sizeof(*c.nat));
     memcpy(&c.nat->fpu_ctxt, v->arch.fpu_ctxt, sizeof(c.nat->fpu_ctxt));
     c(flags = v->arch.vgc_flags & ~(VGCF_i387_valid|VGCF_in_kernel));
     if ( v->fpu_initialised )
@@ -1640,7 +1638,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
         else
         {
             const l4_pgentry_t *l4e =
-                map_domain_page(_mfn(pagetable_get_pfn(v->arch.guest_table)));
+                map_domain_page(pagetable_get_mfn(v->arch.guest_table));
 
             c.cmp->ctrlreg[3] = compat_pfn_to_cr3(l4e_get_pfn(*l4e));
             unmap_domain_page(l4e);

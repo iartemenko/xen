@@ -1002,6 +1002,14 @@ void parse_config_data(const char *config_source,
     if (!xlu_cfg_get_long (config, "maxvcpus", &l, 0))
         b_info->max_vcpus = l;
 
+    if (!xlu_cfg_get_string(config, "vuart", &buf, 0)) {
+        if (libxl_vuart_type_from_string(buf, &b_info->arch_arm.vuart)) {
+            fprintf(stderr, "ERROR: invalid value \"%s\" for \"vuart\"\n",
+                    buf);
+            exit(1);
+        }
+    }
+
     parse_vnuma_config(config, b_info);
 
     /* Set max_memkb to target_memkb and max_vcpus to avail_vcpus if
@@ -1033,7 +1041,7 @@ void parse_config_data(const char *config_source,
         b_info->max_grant_frames = max_grant_frames;
     if (!xlu_cfg_get_long (config, "max_maptrack_frames", &l, 0))
         b_info->max_maptrack_frames = l;
-    else
+    else if (max_maptrack_frames != -1)
         b_info->max_maptrack_frames = max_maptrack_frames;
 
     libxl_defbool_set(&b_info->claim_mode, claim_mode);
@@ -2136,6 +2144,8 @@ skip_usbdev:
         parse_top_level_vnc_options(config, &b_info->u.hvm.vnc);
         parse_top_level_sdl_options(config, &b_info->u.hvm.sdl);
     }
+
+    xlu_cfg_get_defbool(config, "dm_restrict", &b_info->dm_restrict, 0);
 
     if (c_info->type == LIBXL_DOMAIN_TYPE_HVM) {
         if (!xlu_cfg_get_string (config, "vga", &buf, 0)) {

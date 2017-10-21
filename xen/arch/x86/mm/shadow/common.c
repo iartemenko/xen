@@ -1464,7 +1464,7 @@ void shadow_free(struct domain *d, mfn_t smfn)
          * TLBs when we reuse the page.  Because the destructors leave the
          * contents of the pages in place, we can delay TLB flushes until
          * just before the allocator hands the page out again. */
-        sp->tlbflush_timestamp = tlbflush_current_time();
+        page_set_tlbflush_timestamp(sp);
         perfc_decr(shadow_alloc_count);
         page_list_add_tail(sp, &d->arch.paging.shadow.freelist);
         sp = next;
@@ -2640,7 +2640,7 @@ static int sh_remove_shadow_via_pointer(struct domain *d, mfn_t smfn)
     ASSERT(sh_type_has_up_pointer(d, sp->u.sh.type));
 
     if (sp->up == 0) return 0;
-    pmfn = _mfn(sp->up >> PAGE_SHIFT);
+    pmfn = maddr_to_mfn(sp->up);
     ASSERT(mfn_valid(pmfn));
     vaddr = map_domain_page(pmfn);
     ASSERT(vaddr);

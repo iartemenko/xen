@@ -73,6 +73,7 @@ static int p2m_initialise(struct domain *d, struct p2m_domain *p2m)
     p2m->p2m_class = p2m_host;
 
     p2m->np2m_base = P2M_BASE_EADDR;
+    p2m->np2m_generation = 0;
 
     for ( i = 0; i < ARRAY_SIZE(p2m->pod.mrp.list); ++i )
         p2m->pod.mrp.list[i] = gfn_x(INVALID_GFN);
@@ -1729,15 +1730,14 @@ p2m_getlru_nestedp2m(struct domain *d, struct p2m_domain *p2m)
     return p2m;
 }
 
-/* Reset this p2m table to be empty */
 static void
-p2m_flush_table(struct p2m_domain *p2m)
+p2m_flush_table_locked(struct p2m_domain *p2m)
 {
     struct page_info *top, *pg;
     struct domain *d = p2m->domain;
     mfn_t mfn;
 
-    p2m_lock(p2m);
+    ASSERT(p2m_locked_by_me(p2m));
 
     /*
      * "Host" p2m tables can have shared entries &c that need a bit more care
@@ -1750,13 +1750,11 @@ p2m_flush_table(struct p2m_domain *p2m)
 
     /* No need to flush if it's already empty */
     if ( p2m_is_nestedp2m(p2m) && p2m->np2m_base == P2M_BASE_EADDR )
-    {
-        p2m_unlock(p2m);
         return;
-    }
 
     /* This is no longer a valid nested p2m for any address space */
     p2m->np2m_base = P2M_BASE_EADDR;
+    p2m->np2m_generation++;
 
     /* Make sure nobody else is using this p2m table */
     nestedhvm_vmcx_flushtlb(p2m);
@@ -1773,7 +1771,14 @@ p2m_flush_table(struct p2m_domain *p2m)
             d->arch.paging.free_page(d, pg);
     }
     page_list_add(top, &p2m->pages);
+}
 
+/* Reset this p2m table to be empty */
+static void
+p2m_flush_table(struct p2m_domain *p2m)
+{
+    p2m_lock(p2m);
+    p2m_flush_table_locked(p2m);
     p2m_unlock(p2m);
 }
 
@@ -1794,15 +1799,59 @@ p2m_flush_nestedp2m(struct domain *d)
         p2m_flush_table(d->arch.nested_p2m[i]);
 }
 
-struct p2m_domain *
-p2m_get_nestedp2m(struct vcpu *v, uint64_t np2m_base)
+void np2m_flush_base(struct vcpu *v, unsigned long np2m_base)
 {
-    /* Use volatile to prevent gcc to cache nv->nv_p2m in a cpu register as
-     * this may change within the loop by an other (v)cpu.
-     */
-    volatile struct nestedvcpu *nv = &vcpu_nestedhvm(v);
-    struct domain *d;
+    struct domain *d = v->domain;
     struct p2m_domain *p2m;
+    unsigned int i;
+
+    np2m_base &= ~(0xfffull);
+
+    nestedp2m_lock(d);
+    for ( i = 0; i < MAX_NESTEDP2M; i++ )
+    {
+        p2m = d->arch.nested_p2m[i];
+        p2m_lock(p2m);
+        if ( p2m->np2m_base == np2m_base )
+        {
+            p2m_flush_table_locked(p2m);
+            p2m_unlock(p2m);
+            break;
+        }
+        p2m_unlock(p2m);
+    }
+    nestedp2m_unlock(d);
+}
+
+static void assign_np2m(struct vcpu *v, struct p2m_domain *p2m)
+{
+    struct nestedvcpu *nv = &vcpu_nestedhvm(v);
+    struct domain *d = v->domain;
+
+    /* Bring this np2m to the top of the LRU list */
+    p2m_getlru_nestedp2m(d, p2m);
+
+    nv->nv_flushp2m = 0;
+    nv->nv_p2m = p2m;
+    nv->np2m_generation = p2m->np2m_generation;
+    cpumask_set_cpu(v->processor, p2m->dirty_cpumask);
+}
+
+static void nvcpu_flush(struct vcpu *v)
+{
+    hvm_asid_flush_vcpu(v);
+    vcpu_nestedhvm(v).stale_np2m = true;
+}
+
+struct p2m_domain *
+p2m_get_nestedp2m_locked(struct vcpu *v)
+{
+    struct nestedvcpu *nv = &vcpu_nestedhvm(v);
+    struct domain *d = v->domain;
+    struct p2m_domain *p2m;
+    uint64_t np2m_base = nhvm_vcpu_p2m_base(v);
+    unsigned int i;
+    bool needs_flush = true;
 
     /* Mask out low bits; this avoids collisions with P2M_BASE_EADDR */
     np2m_base &= ~(0xfffull);
@@ -1811,25 +1860,36 @@ p2m_get_nestedp2m(struct vcpu *v, uint64_t np2m_base)
         nv->nv_p2m = NULL;
     }
 
-    d = v->domain;
     nestedp2m_lock(d);
     p2m = nv->nv_p2m;
     if ( p2m ) 
     {
         p2m_lock(p2m);
-        if ( p2m->np2m_base == np2m_base || p2m->np2m_base == P2M_BASE_EADDR )
+        if ( p2m->np2m_base == np2m_base )
         {
-            nv->nv_flushp2m = 0;
-            p2m_getlru_nestedp2m(d, p2m);
-            nv->nv_p2m = p2m;
-            if ( p2m->np2m_base == P2M_BASE_EADDR )
-                hvm_asid_flush_vcpu(v);
-            p2m->np2m_base = np2m_base;
-            cpumask_set_cpu(v->processor, p2m->dirty_cpumask);
-            p2m_unlock(p2m);
-            nestedp2m_unlock(d);
-            return p2m;
+            /* Check if np2m was flushed just before the lock */
+            if ( nv->np2m_generation == p2m->np2m_generation )
+                needs_flush = false;
+            /* np2m is up-to-date */
+            goto found;
         }
+        else if ( p2m->np2m_base != P2M_BASE_EADDR )
+        {
+            /* vCPU is switching from some other valid np2m */
+            cpumask_clear_cpu(v->processor, p2m->dirty_cpumask);
+        }
+        p2m_unlock(p2m);
+    }
+
+    /* Share a np2m if possible */
+    for ( i = 0; i < MAX_NESTEDP2M; i++ )
+    {
+        p2m = d->arch.nested_p2m[i];
+        p2m_lock(p2m);
+
+        if ( p2m->np2m_base == np2m_base )
+            goto found;
+
         p2m_unlock(p2m);
     }
 
@@ -1838,13 +1898,21 @@ p2m_get_nestedp2m(struct vcpu *v, uint64_t np2m_base)
     p2m = p2m_getlru_nestedp2m(d, NULL);
     p2m_flush_table(p2m);
     p2m_lock(p2m);
-    nv->nv_p2m = p2m;
+
+ found:
+    if ( needs_flush )
+        nvcpu_flush(v);
     p2m->np2m_base = np2m_base;
-    nv->nv_flushp2m = 0;
-    hvm_asid_flush_vcpu(v);
-    cpumask_set_cpu(v->processor, p2m->dirty_cpumask);
-    p2m_unlock(p2m);
+    assign_np2m(v, p2m);
     nestedp2m_unlock(d);
+
+    return p2m;
+}
+
+struct p2m_domain *p2m_get_nestedp2m(struct vcpu *v)
+{
+    struct p2m_domain *p2m = p2m_get_nestedp2m_locked(v);
+    p2m_unlock(p2m);
 
     return p2m;
 }
@@ -1855,7 +1923,51 @@ p2m_get_p2m(struct vcpu *v)
     if (!nestedhvm_is_n2(v))
         return p2m_get_hostp2m(v->domain);
 
-    return p2m_get_nestedp2m(v, nhvm_vcpu_p2m_base(v));
+    return p2m_get_nestedp2m(v);
+}
+
+void np2m_schedule(int dir)
+{
+    struct vcpu *curr = current;
+    struct nestedvcpu *nv = &vcpu_nestedhvm(curr);
+    struct p2m_domain *p2m;
+
+    ASSERT(dir == NP2M_SCHEDLE_IN || dir == NP2M_SCHEDLE_OUT);
+
+    if ( !nestedhvm_enabled(curr->domain) ||
+         !nestedhvm_vcpu_in_guestmode(curr) ||
+         !nestedhvm_paging_mode_hap(curr) )
+        return;
+
+    p2m = nv->nv_p2m;
+    if ( p2m )
+    {
+        bool np2m_valid;
+
+        p2m_lock(p2m);
+        np2m_valid = p2m->np2m_base == nhvm_vcpu_p2m_base(curr) &&
+                     nv->np2m_generation == p2m->np2m_generation;
+        if ( dir == NP2M_SCHEDLE_OUT && np2m_valid )
+        {
+            /*
+             * The np2m is up to date but this vCPU will no longer use it,
+             * which means there are no reasons to send a flush IPI.
+             */
+            cpumask_clear_cpu(curr->processor, p2m->dirty_cpumask);
+        }
+        else if ( dir == NP2M_SCHEDLE_IN )
+        {
+            if ( !np2m_valid )
+            {
+                /* This vCPU's np2m was flushed while it was not runnable */
+                hvm_asid_flush_core();
+                vcpu_nestedhvm(curr).nv_p2m = NULL;
+            }
+            else
+                cpumask_set_cpu(curr->processor, p2m->dirty_cpumask);
+        }
+        p2m_unlock(p2m);
+    }
 }
 
 unsigned long paging_gva_to_gfn(struct vcpu *v,
@@ -1870,13 +1982,12 @@ unsigned long paging_gva_to_gfn(struct vcpu *v,
         unsigned long l2_gfn, l1_gfn;
         struct p2m_domain *p2m;
         const struct paging_mode *mode;
-        uint64_t np2m_base = nhvm_vcpu_p2m_base(v);
         uint8_t l1_p2ma;
         unsigned int l1_page_order;
         int rv;
 
         /* translate l2 guest va into l2 guest gfn */
-        p2m = p2m_get_nestedp2m(v, np2m_base);
+        p2m = p2m_get_nestedp2m(v);
         mode = paging_get_nestedmode(v);
         l2_gfn = mode->gva_to_gfn(v, p2m, va, pfec);
 

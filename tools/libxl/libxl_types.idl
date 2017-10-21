@@ -105,6 +105,7 @@ libxl_console_type = Enumeration("console_type", [
     (0, "UNKNOWN"),
     (1, "SERIAL"),
     (2, "PV"),
+    (3, "VUART"),
     ])
 
 libxl_disk_format = Enumeration("disk_format", [
@@ -239,6 +240,11 @@ libxl_checkpointed_stream = Enumeration("checkpointed_stream", [
     (0, "NONE"),
     (1, "REMUS"),
     (2, "COLO"),
+    ])
+
+libxl_vuart_type = Enumeration("vuart_type", [
+    (0, "unknown"),
+    (1, "sbsa_uart"),
     ])
 
 #
@@ -415,14 +421,14 @@ libxl_domain_sched_params = Struct("domain_sched_params",[
     ("cap",          integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_CAP_DEFAULT'}),
     ("period",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_PERIOD_DEFAULT'}),
     ("budget",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_BUDGET_DEFAULT'}),
+    ("extratime",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRATIME_DEFAULT'}),
 
-    # The following three parameters ('slice', 'latency' and 'extratime') are deprecated,
+    # The following three parameters ('slice' and 'latency') are deprecated,
     # and will have no effect if used, since the SEDF scheduler has been removed.
-    # Note that 'period' was an SDF parameter too, but it is still effective as it is
-    # now used (together with 'budget') by the RTDS scheduler.
+    # Note that 'period' and 'extratime' was an SDF parameter too, but it is still effective
+    # as they are now used (together with 'budget') by the RTDS scheduler.
     ("slice",        integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_SLICE_DEFAULT'}),
     ("latency",      integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_LATENCY_DEFAULT'}),
-    ("extratime",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRATIME_DEFAULT'}),
     ])
 
 libxl_vnode_info = Struct("vnode_info", [
@@ -474,8 +480,8 @@ libxl_domain_build_info = Struct("domain_build_info",[
 
     ("vnuma_nodes", Array(libxl_vnode_info, "num_vnuma_nodes")),
 
-    ("max_grant_frames",    uint32),
-    ("max_maptrack_frames", uint32),
+    ("max_grant_frames",    uint32, {'init_val': 'LIBXL_MAX_GRANT_FRAMES_DEFAULT'}),
+    ("max_maptrack_frames", uint32, {'init_val': 'LIBXL_MAX_MAPTRACK_FRAMES_DEFAULT'}),
     
     ("device_model_version", libxl_device_model_version),
     ("device_model_stubdomain", libxl_defbool),
@@ -515,6 +521,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
     ("timer_mode",       libxl_timer_mode),
     ("nested_hvm",       libxl_defbool),
     ("apic",             libxl_defbool),
+    ("dm_restrict",      libxl_defbool),
     ("u", KeyedUnion(None, libxl_domain_type, "type",
                 [("hvm", Struct(None, [("firmware",         string),
                                        ("bios",             libxl_bios_type),
@@ -591,6 +598,7 @@ libxl_domain_build_info = Struct("domain_build_info",[
 
 
     ("arch_arm", Struct(None, [("gic_version", libxl_gic_version),
+                               ("vuart", libxl_vuart_type),
                               ])),
     # Alternate p2m is not bound to any architecture or guest type, as it is
     # supported by x86 HVM and ARM support is planned.

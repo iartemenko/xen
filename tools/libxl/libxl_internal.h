@@ -19,6 +19,8 @@
 
 #include "libxl_osdeps.h" /* must come before any other headers */
 
+#include "xentoolcore_internal.h"
+
 #include "libxl_sr_stream_format.h"
 
 #include <assert.h>
@@ -1139,6 +1141,9 @@ typedef struct {
     uint32_t num_vmemranges;
 
     xc_domain_configuration_t config;
+
+    xen_pfn_t vuart_gfn;
+    evtchn_port_t vuart_port;
 } libxl__domain_build_state;
 
 _hidden int libxl__build_pre(libxl__gc *gc, uint32_t domid,
@@ -1203,6 +1208,9 @@ _hidden int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
                                       libxl__device_console *console,
                                       libxl__domain_build_state *state,
                                       libxl__device *device);
+_hidden int libxl__device_vuart_add(libxl__gc *gc, uint32_t domid,
+                                    libxl__device_console *console,
+                                    libxl__domain_build_state *state);
 
 /* Returns 1 if device exists, 0 if not, ERROR_* (<0) on error. */
 _hidden int libxl__device_exists(libxl__gc *gc, xs_transaction_t t,
@@ -3787,7 +3795,7 @@ void libxl__xc_domain_saverestore_async_callback_done(libxl__egc *egc,
 
 
 _hidden void libxl__domain_suspend_common_switch_qemu_logdirty
-                               (int domid, unsigned int enable, void *data);
+                               (uint32_t domid, unsigned int enable, void *data);
 _hidden void libxl__domain_common_switch_qemu_logdirty(libxl__egc *egc,
                                                int domid, unsigned enable,
                                                libxl__logdirty_switch *lds);
@@ -3842,36 +3850,6 @@ _hidden void libxl__remus_restore_setup(libxl__egc *egc,
 /*
  * Convenience macros.
  */
-
-/*
- * CONTAINER_OF work like this.  Given:
- *    typedef struct {
- *      ...
- *      member_type member_name;
- *      ...
- *    } outer_type;
- *    outer_type outer, *outer_var;
- *    member_type *inner_ptr = &outer->member_name;
- *
- * Then, effectively:
- *    outer_type *CONTAINER_OF(member_type *inner_ptr,
- *                             *outer_var, // or type name for outer_type
- *                             member_name);
- *
- * So that:
- *    CONTAINER_OF(inner_ptr, *outer_var, member_name) == &outer
- *    CONTAINER_OF(inner_ptr, outer_type, member_name) == &outer
- */
-#define CONTAINER_OF(inner_ptr, outer, member_name)                     \
-    ({                                                                  \
-        typeof(outer) *container_of_;                                   \
-        container_of_ = (void*)((char*)(inner_ptr) -                    \
-                                offsetof(typeof(outer), member_name));  \
-        (void)(&container_of_->member_name ==                           \
-               (typeof(inner_ptr))0) /* type check */;                  \
-        container_of_;                                                  \
-    })
-
 
 #define FILLZERO LIBXL_FILLZERO
 
@@ -4336,6 +4314,7 @@ _hidden int libxl__read_sysfs_file_contents(libxl__gc *gc,
 #define LIBXL_QEMU_USER_PREFIX "xen-qemuuser"
 #define LIBXL_QEMU_USER_BASE   LIBXL_QEMU_USER_PREFIX"-domid"
 #define LIBXL_QEMU_USER_SHARED LIBXL_QEMU_USER_PREFIX"-shared"
+#define LIBXL_QEMU_USER_RANGE_BASE LIBXL_QEMU_USER_PREFIX"-range-base"
 
 static inline bool libxl__acpi_defbool_val(const libxl_domain_build_info *b_info)
 {

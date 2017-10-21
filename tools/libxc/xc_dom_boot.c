@@ -110,7 +110,7 @@ int xc_dom_compat_check(struct xc_dom_image *dom)
     return found;
 }
 
-int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, domid_t domid)
+int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, uint32_t domid)
 {
     dom->xch = xch;
     dom->guest_domid = domid;
@@ -226,6 +226,8 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
         return rc;
     if ( (rc = clear_page(dom, dom->xenstore_pfn)) != 0 )
         return rc;
+    if ( (rc = clear_page(dom, dom->vuart_gfn)) != 0 )
+        return rc;
 
     /* start info page */
     if ( dom->arch_hooks->start_info )
@@ -248,7 +250,7 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
     return rc;
 }
 
-static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, domid_t domid)
+static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, uint32_t domid)
 {
     gnttab_setup_table_t setup;
     DECLARE_HYPERCALL_BUFFER(xen_pfn_t, gmfnp);
@@ -280,11 +282,11 @@ static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, domid_t domid)
     return gmfn;
 }
 
-int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
+int xc_dom_gnttab_seed(xc_interface *xch, uint32_t domid,
                        xen_pfn_t console_gmfn,
                        xen_pfn_t xenstore_gmfn,
-                       domid_t console_domid,
-                       domid_t xenstore_domid)
+                       uint32_t console_domid,
+                       uint32_t xenstore_domid)
 {
 
     xen_pfn_t gnttab_gmfn;
@@ -337,11 +339,11 @@ int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
     return 0;
 }
 
-int xc_dom_gnttab_hvm_seed(xc_interface *xch, domid_t domid,
+int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
                            xen_pfn_t console_gpfn,
                            xen_pfn_t xenstore_gpfn,
-                           domid_t console_domid,
-                           domid_t xenstore_domid)
+                           uint32_t console_domid,
+                           uint32_t xenstore_domid)
 {
     int rc;
     xen_pfn_t scratch_gpfn;

@@ -1547,15 +1547,16 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
 
     switch ( cr )
     {
-    case 0: {
-        int realmode;
+    case 0:
+    {
+        bool realmode;
         unsigned long hw_cr0_mask = X86_CR0_NE;
 
         if ( !vmx_unrestricted_guest(v) )
             hw_cr0_mask |= X86_CR0_PG | X86_CR0_PE;
 
         if ( paging_mode_shadow(v->domain) )
-           hw_cr0_mask |= X86_CR0_WP;
+            hw_cr0_mask |= X86_CR0_WP;
 
         if ( paging_mode_hap(v->domain) )
         {
@@ -1590,12 +1591,12 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
                 vmx_fpu_enter(v);
         }
 
-        realmode = !(v->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE); 
+        realmode = !(v->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE);
 
-        if ( (!vmx_unrestricted_guest(v)) &&
+        if ( !vmx_unrestricted_guest(v) &&
              (realmode != v->arch.hvm_vmx.vmx_realmode) )
         {
-            enum x86_segment s; 
+            enum x86_segment s;
             struct segment_register reg[x86_seg_tr + 1];
 
             BUILD_BUG_ON(x86_seg_tr != x86_seg_gs + 1);
@@ -1606,13 +1607,13 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
             for ( s = 0; s < ARRAY_SIZE(reg); s++ )
                 hvm_get_segment_register(v, s, &reg[s]);
             v->arch.hvm_vmx.vmx_realmode = realmode;
-            
+
             if ( realmode )
             {
                 for ( s = 0; s < ARRAY_SIZE(reg); s++ )
                     hvm_set_segment_register(v, s, &reg[s]);
             }
-            else 
+            else
             {
                 for ( s = 0; s < ARRAY_SIZE(reg); s++ )
                     if ( !(v->arch.hvm_vmx.vm86_segment_mask & (1<<s)) )
@@ -1626,26 +1627,8 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
         v->arch.hvm_vcpu.hw_cr[0] =
             v->arch.hvm_vcpu.guest_cr[0] | hw_cr0_mask;
         __vmwrite(GUEST_CR0, v->arch.hvm_vcpu.hw_cr[0]);
-
-        /* Changing CR0 can change some bits in real CR4. */
-        vmx_update_guest_cr(v, 4);
-        break;
     }
-    case 2:
-        /* CR2 is updated in exit stub. */
-        break;
-    case 3:
-        if ( paging_mode_hap(v->domain) )
-        {
-            if ( !hvm_paging_enabled(v) && !vmx_unrestricted_guest(v) )
-                v->arch.hvm_vcpu.hw_cr[3] =
-                    v->domain->arch.hvm_domain.params[HVM_PARAM_IDENT_PT];
-            vmx_load_pdptrs(v);
-        }
- 
-        __vmwrite(GUEST_CR3, v->arch.hvm_vcpu.hw_cr[3]);
-        hvm_asid_flush_vcpu(v);
-        break;
+        /* Fallthrough: Changing CR0 can change some bits in real CR4. */
     case 4:
         v->arch.hvm_vcpu.hw_cr[4] = HVM_CR4_HOST_MASK;
         if ( paging_mode_hap(v->domain) )
@@ -1657,25 +1640,62 @@ static void vmx_update_guest_cr(struct vcpu *v, unsigned int cr)
             nvmx_set_cr_read_shadow(v, 4);
 
         v->arch.hvm_vcpu.hw_cr[4] |= v->arch.hvm_vcpu.guest_cr[4];
-        if ( v->arch.hvm_vmx.vmx_realmode ) 
+        if ( v->arch.hvm_vmx.vmx_realmode )
             v->arch.hvm_vcpu.hw_cr[4] |= X86_CR4_VME;
-        if ( paging_mode_hap(v->domain) && !hvm_paging_enabled(v) )
-        {
-            v->arch.hvm_vcpu.hw_cr[4] |= X86_CR4_PSE;
-            v->arch.hvm_vcpu.hw_cr[4] &= ~X86_CR4_PAE;
-        }
+
         if ( !hvm_paging_enabled(v) )
         {
             /*
-             * SMEP/SMAP is disabled if CPU is in non-paging mode in hardware.
-             * However Xen always uses paging mode to emulate guest non-paging
-             * mode. To emulate this behavior, SMEP/SMAP needs to be manually
-             * disabled when guest VCPU is in non-paging mode.
+             * When the guest thinks paging is disabled, Xen may need to hide
+             * the effects of running with CR0.PG actually enabled.  There are
+             * two subtly complicated cases.
+             */
+
+            if ( paging_mode_hap(v->domain) )
+            {
+                /*
+                 * On hardware lacking the Unrestricted Guest feature (or with
+                 * it disabled in the VMCS), we may not enter the guest with
+                 * CR0.PG actually disabled.  When EPT is enabled, we run with
+                 * guest paging settings, but with CR3 pointing at
+                 * HVM_PARAM_IDENT_PT which is a 32bit pagetable using 4M
+                 * superpages.  Override the guests paging settings to match.
+                 */
+                v->arch.hvm_vcpu.hw_cr[4] |= X86_CR4_PSE;
+                v->arch.hvm_vcpu.hw_cr[4] &= ~X86_CR4_PAE;
+            }
+
+            /*
+             * Without CR0.PG, all memory accesses are user mode, so
+             * _PAGE_USER must be set in the pagetables for guest userspace to
+             * function.  This in turn trips up guest supervisor mode if
+             * SMEP/SMAP are left active in context.  They wouldn't have any
+             * effect if paging was actually disabled, so hide them behind the
+             * back of the guest.
              */
             v->arch.hvm_vcpu.hw_cr[4] &= ~(X86_CR4_SMEP | X86_CR4_SMAP);
         }
+
         __vmwrite(GUEST_CR4, v->arch.hvm_vcpu.hw_cr[4]);
         break;
+
+    case 2:
+        /* CR2 is updated in exit stub. */
+        break;
+
+    case 3:
+        if ( paging_mode_hap(v->domain) )
+        {
+            if ( !hvm_paging_enabled(v) && !vmx_unrestricted_guest(v) )
+                v->arch.hvm_vcpu.hw_cr[3] =
+                    v->domain->arch.hvm_domain.params[HVM_PARAM_IDENT_PT];
+            vmx_load_pdptrs(v);
+        }
+
+        __vmwrite(GUEST_CR3, v->arch.hvm_vcpu.hw_cr[3]);
+        hvm_asid_flush_vcpu(v);
+        break;
+
     default:
         BUG();
     }
@@ -3249,12 +3269,6 @@ static void ept_handle_violation(ept_qual_t q, paddr_t gpa)
     case 0:         // Unhandled L1 EPT violation
         break;
     case 1:         // This violation is handled completly
-        /*Current nested EPT maybe flushed by other vcpus, so need
-         * to re-set its shadow EPTP pointer.
-         */
-        if ( nestedhvm_vcpu_in_guestmode(current) &&
-                        nestedhvm_paging_mode_hap(current ) )
-            __vmwrite(EPT_POINTER, get_shadow_eptp(current));
         return;
     case -1:        // This vioaltion should be injected to L1 VMM
         vcpu_nestedhvm(current).nv_vmexit_pending = 1;
@@ -4203,12 +4217,17 @@ static void lbr_fixup(void)
         bdw_erratum_bdf14_fixup();
 }
 
-void vmx_vmenter_helper(const struct cpu_user_regs *regs)
+/* Returns false if the vmentry has to be restarted */
+bool vmx_vmenter_helper(const struct cpu_user_regs *regs)
 {
     struct vcpu *curr = current;
     u32 new_asid, old_asid;
     struct hvm_vcpu_asid *p_asid;
     bool_t need_flush;
+
+    /* Shadow EPTP can't be updated here because irqs are disabled */
+     if ( nestedhvm_vcpu_in_guestmode(curr) && vcpu_nestedhvm(curr).stale_np2m )
+         return false;
 
     if ( curr->domain->arch.hvm_domain.pi_ops.do_resume )
         curr->domain->arch.hvm_domain.pi_ops.do_resume(curr);
@@ -4270,6 +4289,8 @@ void vmx_vmenter_helper(const struct cpu_user_regs *regs)
     __vmwrite(GUEST_RIP,    regs->rip);
     __vmwrite(GUEST_RSP,    regs->rsp);
     __vmwrite(GUEST_RFLAGS, regs->rflags | X86_EFLAGS_MBS);
+
+    return true;
 }
 
 /*

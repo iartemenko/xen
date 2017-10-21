@@ -15,7 +15,8 @@
 #include <unistd.h>
 #include <xen/xen.h>
 
-#include "x86_emulate.h"
+#include "x86-emulate.h"
+#include "fuzz-emul.h"
 
 #define MSR_INDEX_MAX 16
 
@@ -29,7 +30,7 @@ struct fuzz_corpus
     struct cpu_user_regs regs;
     struct segment_register segments[SEG_NUM];
     unsigned long options;
-    unsigned char data[4096];
+    unsigned char data[INPUT_SIZE];
 } input;
 #define DATA_OFFSET offsetof(struct fuzz_corpus, data)
 
@@ -52,6 +53,30 @@ struct fuzz_state
     struct x86_emulate_ops ops;
 };
 
+static inline bool input_avail(const struct fuzz_state *s, size_t size)
+{
+    return s->data_index + size <= s->data_num;
+}
+
+static inline bool input_read(struct fuzz_state *s, void *dst, size_t size)
+{
+    if ( !input_avail(s, size) )
+        return false;
+
+    memcpy(dst, &s->corpus->data[s->data_index], size);
+    s->data_index += size;
+
+    return true;
+}
+
+static const char* const x86emul_return_string[] = {
+    [X86EMUL_OKAY] = "X86EMUL_OKAY",
+    [X86EMUL_UNHANDLEABLE] = "X86EMUL_UNHANDLEABLE",
+    [X86EMUL_EXCEPTION] = "X86EMUL_EXCEPTION",
+    [X86EMUL_RETRY] = "X86EMUL_RETRY",
+    [X86EMUL_DONE] = "X86EMUL_DONE",
+};
+
 /*
  * Randomly return success or failure when processing data.  If
  * `exception` is false, this function turns _EXCEPTION to _OKAY.
@@ -60,10 +85,10 @@ static int maybe_fail(struct x86_emulate_ctxt *ctxt,
                       const char *why, bool exception)
 {
     struct fuzz_state *s = ctxt->data;
-    const struct fuzz_corpus *c = s->corpus;
+    unsigned char c;
     int rc;
 
-    if ( s->data_index >= s->data_num )
+    if ( !input_read(s, &c, sizeof(c)) )
         rc = X86EMUL_EXCEPTION;
     else
     {
@@ -72,19 +97,18 @@ static int maybe_fail(struct x86_emulate_ctxt *ctxt,
          * 25% unhandlable
          * 25% exception
          */
-        if ( c->data[s->data_index] > 0xc0 )
+        if ( c > 0xc0 )
             rc = X86EMUL_EXCEPTION;
-        else if ( c->data[s->data_index] > 0x80 )
+        else if ( c > 0x80 )
             rc = X86EMUL_UNHANDLEABLE;
         else
             rc = X86EMUL_OKAY;
-        s->data_index++;
     }
 
     if ( rc == X86EMUL_EXCEPTION && !exception )
         rc = X86EMUL_OKAY;
 
-    printf("maybe_fail %s: %d\n", why, rc);
+    printf("maybe_fail %s: %s\n", why, x86emul_return_string[rc]);
 
     if ( rc == X86EMUL_EXCEPTION )
         /* Fake up a pagefault. */
@@ -98,11 +122,10 @@ static int data_read(struct x86_emulate_ctxt *ctxt,
                      const char *why, void *dst, unsigned int bytes)
 {
     struct fuzz_state *s = ctxt->data;
-    const struct fuzz_corpus *c = s->corpus;
     unsigned int i;
     int rc;
 
-    if ( s->data_index + bytes > s->data_num )
+    if ( !input_avail(s, bytes) )
     {
         /*
          * Fake up a segment limit violation.  System segment limit volations
@@ -113,14 +136,14 @@ static int data_read(struct x86_emulate_ctxt *ctxt,
             x86_emul_hw_exception(13, 0, ctxt);
 
         rc = X86EMUL_EXCEPTION;
+        printf("data_read %s: X86EMUL_EXCEPTION (end of input)\n", why);
     }
     else
         rc = maybe_fail(ctxt, why, true);
 
     if ( rc == X86EMUL_OKAY )
     {
-        memcpy(dst, &c->data[s->data_index], bytes);
-        s->data_index += bytes;
+        input_read(s, dst, bytes);
 
         printf("%s: ", why);
         for ( i = 0; i < bytes; i++ )
@@ -139,7 +162,18 @@ static int fuzz_read(
     struct x86_emulate_ctxt *ctxt)
 {
     /* Reads expected for all user and system segments. */
-    assert(is_x86_user_segment(seg) || is_x86_system_segment(seg));
+    if ( is_x86_user_segment(seg) )
+        assert(ctxt->addr_size == 64 || !(offset >> 32));
+    else if ( seg == x86_seg_tr )
+        /*
+         * The TSS is special in that accesses below the segment base are
+         * possible, as the Interrupt Redirection Bitmap starts 32 bytes
+         * ahead of the I/O Bitmap, regardless of the value of the latter.
+         */
+        assert((long)offset < 0 ? (long)offset > -32 : !(offset >> 17));
+    else
+        assert(is_x86_system_segment(seg) &&
+               (ctxt->lma ? offset <= 0x10007 : !(offset >> 16)));
 
     return data_read(ctxt, seg, "read", p_data, bytes);
 }
@@ -161,6 +195,13 @@ static int fuzz_insn_fetch(
     struct x86_emulate_ctxt *ctxt)
 {
     assert(seg == x86_seg_cs);
+
+    /* Minimal segment limit checking, until full one is being put in place. */
+    if ( ctxt->addr_size < 64 && (offset >> 32) )
+    {
+        x86_emul_hw_exception(13, 0, ctxt);
+        return X86EMUL_EXCEPTION;
+    }
 
     /*
      * Zero-length instruction fetches are made at the destination of jumps,
@@ -232,6 +273,7 @@ static int fuzz_rep_ins(
     struct x86_emulate_ctxt *ctxt)
 {
     assert(dst_seg == x86_seg_es);
+    assert(ctxt->addr_size == 64 || !(dst_offset >> 32));
 
     return _fuzz_rep_read(ctxt, "rep_ins", reps);
 }
@@ -247,6 +289,7 @@ static int fuzz_rep_movs(
 {
     assert(is_x86_user_segment(src_seg));
     assert(dst_seg == x86_seg_es);
+    assert(ctxt->addr_size == 64 || !((src_offset | dst_offset) >> 32));
 
     return _fuzz_rep_read(ctxt, "rep_movs", reps);
 }
@@ -260,6 +303,7 @@ static int fuzz_rep_outs(
     struct x86_emulate_ctxt *ctxt)
 {
     assert(is_x86_user_segment(src_seg));
+    assert(ctxt->addr_size == 64 || !(src_offset >> 32));
 
     return _fuzz_rep_write(ctxt, "rep_outs", reps);
 }
@@ -277,6 +321,7 @@ static int fuzz_rep_stos(
      * for CLZERO.
      */
     assert(is_x86_user_segment(seg));
+    assert(ctxt->addr_size == 64 || !(offset >> 32));
 
     return _fuzz_rep_write(ctxt, "rep_stos", reps);
 }
@@ -290,6 +335,7 @@ static int fuzz_write(
 {
     /* Writes not expected for any system segments. */
     assert(is_x86_user_segment(seg));
+    assert(ctxt->addr_size == 64 || !(offset >> 32));
 
     return maybe_fail(ctxt, "write", true);
 }
@@ -306,8 +352,10 @@ static int fuzz_cmpxchg(
      * Cmpxchg expected for user segments, and setting accessed/busy bits in
      * GDT/LDT enties, but not expected for any IDT or TR accesses.
      */
-    assert(is_x86_user_segment(seg) ||
-           seg == x86_seg_gdtr || seg == x86_seg_ldtr);
+    if ( is_x86_user_segment(seg) )
+        assert(ctxt->addr_size == 64 || !(offset >> 32));
+    else
+        assert((seg == x86_seg_gdtr || seg == x86_seg_ldtr) && !(offset >> 16));
 
     return maybe_fail(ctxt, "cmpxchg", true);
 }
@@ -319,6 +367,7 @@ static int fuzz_invlpg(
 {
     /* invlpg(), unlike all other hooks, may be called with x86_seg_none. */
     assert(is_x86_user_segment(seg) || seg == x86_seg_none);
+    assert(ctxt->addr_size == 64 || !(offset >> 32));
 
     return maybe_fail(ctxt, "invlpg", false);
 }
@@ -759,13 +808,12 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
 {
-    struct cpu_user_regs regs = {};
     struct fuzz_state state = {
         .ops = all_fuzzer_ops,
     };
     struct x86_emulate_ctxt ctxt = {
         .data = &state,
-        .regs = &regs,
+        .regs = &input.regs,
         .addr_size = 8 * sizeof(void *),
         .sp_size = 8 * sizeof(void *),
     };
@@ -780,7 +828,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
         return 1;
     }
 
-    if ( size > sizeof(input) )
+    if ( size > INPUT_SIZE )
     {
         printf("Input too large\n");
         return 1;
@@ -811,6 +859,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
 
 unsigned int fuzz_minimal_input_size(void)
 {
+    BUILD_BUG_ON(DATA_OFFSET > INPUT_SIZE);
+
     return DATA_OFFSET + 1;
 }
 

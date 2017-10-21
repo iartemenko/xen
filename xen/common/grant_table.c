@@ -54,6 +54,9 @@ struct grant_table {
      * what version to use yet.
      */
     unsigned int          gt_version;
+    /* Resource limits of the domain. */
+    unsigned int          max_grant_frames;
+    unsigned int          max_maptrack_frames;
     /* Table size. Number of frames shared with guest */
     unsigned int          nr_grant_frames;
     /* Number of grant status frames shared with guest (for version 2) */
@@ -73,28 +76,26 @@ struct grant_table {
     /* Mapping tracking table per vcpu. */
     struct grant_mapping **maptrack;
 
+    /* Domain to which this struct grant_table belongs. */
+    const struct domain *domain;
+
     struct grant_table_arch arch;
 };
 
 #ifndef DEFAULT_MAX_NR_GRANT_FRAMES /* to allow arch to override */
 /* Default maximum size of a grant table. [POLICY] */
-#define DEFAULT_MAX_NR_GRANT_FRAMES   32
+#define DEFAULT_MAX_NR_GRANT_FRAMES   64
 #endif
 
-unsigned int __read_mostly max_grant_frames;
-integer_param("gnttab_max_frames", max_grant_frames);
+static unsigned int __read_mostly max_grant_frames =
+                                               DEFAULT_MAX_NR_GRANT_FRAMES;
+integer_runtime_param("gnttab_max_frames", max_grant_frames);
 
-/* The maximum number of grant mappings is defined as a multiplier of the
- * maximum number of grant table entries. This defines the multiplier used.
- * Pretty arbitrary. [POLICY]
- * As gnttab_max_nr_frames has been deprecated, this multiplier is deprecated too.
- * New options allow to set max_maptrack_frames and
- * map_grant_table_frames independently.
- */
 #define DEFAULT_MAX_MAPTRACK_FRAMES 1024
 
-static unsigned int __read_mostly max_maptrack_frames;
-integer_param("gnttab_max_maptrack_frames", max_maptrack_frames);
+static unsigned int __read_mostly max_maptrack_frames =
+                                               DEFAULT_MAX_MAPTRACK_FRAMES;
+integer_runtime_param("gnttab_max_maptrack_frames", max_maptrack_frames);
 
 /*
  * Note that the three values below are effectively part of the ABI, even if
@@ -290,8 +291,8 @@ num_act_frames_from_sha_frames(const unsigned int num)
     return DIV_ROUND_UP(num * sha_per_page, ACGNT_PER_PAGE);
 }
 
-#define max_nr_active_grant_frames \
-    num_act_frames_from_sha_frames(max_grant_frames)
+#define max_nr_active_grant_frames(gt) \
+    num_act_frames_from_sha_frames((gt)->max_grant_frames)
 
 static inline unsigned int
 nr_active_grant_frames(struct grant_table *gt)
@@ -530,7 +531,7 @@ get_maptrack_handle(
      * out of memory, try stealing an entry from another VCPU (in case the
      * guest isn't mapping across its VCPUs evenly).
      */
-    if ( nr_maptrack_frames(lgt) < max_maptrack_frames )
+    if ( nr_maptrack_frames(lgt) < lgt->max_maptrack_frames )
         new_mt = alloc_xenheap_page();
 
     if ( !new_mt )
@@ -653,7 +654,7 @@ static int _set_status_v1(domid_t  domid,
                GTF_permit_access) ||
               (scombo.shorts.domid != domid)) )
             PIN_FAIL(done, GNTST_general_error,
-                     "Bad flags (%x) or dom (%d). (expected dom %d)\n",
+                     "Bad flags (%x) or dom (%d); expected d%d\n",
                      scombo.shorts.flags, scombo.shorts.domid,
                      domid);
 
@@ -665,7 +666,7 @@ static int _set_status_v1(domid_t  domid,
             new_scombo.shorts.flags |= GTF_writing;
             if ( unlikely(scombo.shorts.flags & GTF_readonly) )
                 PIN_FAIL(done, GNTST_general_error,
-                         "Attempt to write-pin a r/o grant entry.\n");
+                         "Attempt to write-pin a r/o grant entry\n");
         }
 
         prev_scombo.word = cmpxchg((u32 *)shah,
@@ -675,7 +676,7 @@ static int _set_status_v1(domid_t  domid,
 
         if ( retries++ == 4 )
             PIN_FAIL(done, GNTST_general_error,
-                     "Shared grant entry is unstable.\n");
+                     "Shared grant entry is unstable\n");
 
         scombo = prev_scombo;
     }
@@ -717,7 +718,7 @@ static int _set_status_v2(domid_t  domid,
             ((flags & mask) != GTF_transitive)) ||
           (id != domid)) )
         PIN_FAIL(done, GNTST_general_error,
-                 "Bad flags (%x) or dom (%d). (expected dom %d, flags %x)\n",
+                 "Bad flags (%x) or dom (%d); expected d%d, flags %x\n",
                  flags, id, domid, mask);
 
     if ( readonly )
@@ -728,7 +729,7 @@ static int _set_status_v2(domid_t  domid,
     {
         if ( unlikely(flags & GTF_readonly) )
             PIN_FAIL(done, GNTST_general_error,
-                     "Attempt to write-pin a r/o grant entry.\n");
+                     "Attempt to write-pin a r/o grant entry\n");
         *status |= GTF_reading | GTF_writing;
     }
 
@@ -751,8 +752,7 @@ static int _set_status_v2(domid_t  domid,
             gnttab_clear_flag(_GTF_writing, status);
             gnttab_clear_flag(_GTF_reading, status);
             PIN_FAIL(done, GNTST_general_error,
-                     "Unstable flags (%x) or dom (%d). (expected dom %d) "
-                     "(r/w: %d)\n",
+                     "Unstable flags (%x) or dom (%d); expected d%d (r/w: %d)\n",
                      flags, id, domid, !readonly);
         }
     }
@@ -898,7 +898,7 @@ map_grant_ref(
 
     if ( unlikely((op->flags & (GNTMAP_device_map|GNTMAP_host_map)) == 0) )
     {
-        gdprintk(XENLOG_INFO, "Bad flags in grant map op (%x).\n", op->flags);
+        gdprintk(XENLOG_INFO, "Bad flags in grant map op: %x\n", op->flags);
         op->status = GNTST_bad_gntref;
         return;
     }
@@ -907,7 +907,7 @@ map_grant_ref(
                   (op->flags & (GNTMAP_device_map|GNTMAP_application_map|
                             GNTMAP_contains_pte))) )
     {
-        gdprintk(XENLOG_INFO, "No device mapping in HVM domain.\n");
+        gdprintk(XENLOG_INFO, "No device mapping in HVM domain\n");
         op->status = GNTST_general_error;
         return;
     }
@@ -932,7 +932,7 @@ map_grant_ref(
     if ( unlikely(handle == INVALID_MAPTRACK_HANDLE) )
     {
         rcu_unlock_domain(rd);
-        gdprintk(XENLOG_INFO, "Failed to obtain maptrack handle.\n");
+        gdprintk(XENLOG_INFO, "Failed to obtain maptrack handle\n");
         op->status = GNTST_no_device_space;
         return;
     }
@@ -942,7 +942,8 @@ map_grant_ref(
 
     /* Bounds check on the grant ref */
     if ( unlikely(op->ref >= nr_grant_entries(rgt)))
-        PIN_FAIL(unlock_out, GNTST_bad_gntref, "Bad ref %#x\n", op->ref);
+        PIN_FAIL(unlock_out, GNTST_bad_gntref, "Bad ref %#x for d%d\n",
+                 op->ref, rgt->domain->domain_id);
 
     act = active_entry_acquire(rgt, op->ref);
     shah = shared_entry_header(rgt, op->ref);
@@ -1241,7 +1242,8 @@ unmap_common(
 
     if ( unlikely(op->handle >= lgt->maptrack_limit) )
     {
-        gdprintk(XENLOG_INFO, "Bad handle %#x\n", op->handle);
+        gdprintk(XENLOG_INFO, "Bad d%d handle %#x\n",
+                 lgt->domain->domain_id, op->handle);
         op->status = GNTST_bad_handle;
         return;
     }
@@ -1251,7 +1253,8 @@ unmap_common(
 
     if ( unlikely(!read_atomic(&map->flags)) )
     {
-        gdprintk(XENLOG_INFO, "Zero flags for handle %#x\n", op->handle);
+        gdprintk(XENLOG_INFO, "Zero flags for d%d handle %#x\n",
+                 lgt->domain->domain_id, op->handle);
         op->status = GNTST_bad_handle;
         return;
     }
@@ -1306,7 +1309,8 @@ unmap_common(
     smp_rmb();
     if ( unlikely(op->ref >= nr_grant_entries(rgt)) )
     {
-        gdprintk(XENLOG_WARNING, "Unstable handle %#x\n", op->handle);
+        gdprintk(XENLOG_WARNING, "Unstable d%d handle %#x\n",
+                 rgt->domain->domain_id, op->handle);
         rc = GNTST_bad_handle;
         flags = 0;
         goto unlock_out;
@@ -1677,10 +1681,10 @@ gnttab_grow_table(struct domain *d, unsigned int req_nr_frames)
 
     if ( req_nr_frames < INITIAL_NR_GRANT_FRAMES )
         req_nr_frames = INITIAL_NR_GRANT_FRAMES;
-    ASSERT(req_nr_frames <= max_grant_frames);
+    ASSERT(req_nr_frames <= gt->max_grant_frames);
 
     gdprintk(XENLOG_INFO,
-            "Expanding dom (%d) grant table from (%d) to (%d) frames.\n",
+            "Expanding d%d grant table from %u to %u frames\n",
             d->domain_id, nr_grant_frames(gt), req_nr_frames);
 
     /* Active */
@@ -1729,13 +1733,15 @@ active_alloc_failed:
         free_xenheap_page(gt->active[i]);
         gt->active[i] = NULL;
     }
-    gdprintk(XENLOG_INFO, "Allocation failure when expanding grant table.\n");
+    gdprintk(XENLOG_INFO, "Allocation failure when expanding d%d grant table\n",
+             d->domain_id);
 
     return -ENOMEM;
 }
 
 static int
-grant_table_init(struct domain *d, struct grant_table *gt)
+grant_table_init(struct domain *d, struct grant_table *gt,
+                 unsigned int grant_frames, unsigned int maptrack_frames)
 {
     int ret = -ENOMEM;
 
@@ -1747,25 +1753,31 @@ grant_table_init(struct domain *d, struct grant_table *gt)
         goto out_no_cleanup;
     }
 
+    gt->max_grant_frames = grant_frames;
+    gt->max_maptrack_frames = maptrack_frames;
+
     /* Active grant table. */
     gt->active = xzalloc_array(struct active_grant_entry *,
-                               max_nr_active_grant_frames);
+                               max_nr_active_grant_frames(gt));
     if ( gt->active == NULL )
         goto out;
 
     /* Tracking of mapped foreign frames table */
-    gt->maptrack = vzalloc(max_maptrack_frames * sizeof(*gt->maptrack));
-    if ( gt->maptrack == NULL )
-        goto out;
+    if ( gt->max_maptrack_frames )
+    {
+        gt->maptrack = vzalloc(gt->max_maptrack_frames * sizeof(*gt->maptrack));
+        if ( gt->maptrack == NULL )
+            goto out;
+    }
 
     /* Shared grant table. */
-    gt->shared_raw = xzalloc_array(void *, max_grant_frames);
+    gt->shared_raw = xzalloc_array(void *, gt->max_grant_frames);
     if ( gt->shared_raw == NULL )
         goto out;
 
     /* Status pages for grant table - for version 2 */
     gt->status = xzalloc_array(grant_status_t *,
-                               grant_to_status_frames(max_grant_frames));
+                               grant_to_status_frames(gt->max_grant_frames));
     if ( gt->status == NULL )
         goto out;
 
@@ -1798,7 +1810,8 @@ grant_table_init(struct domain *d, struct grant_table *gt)
 
 static long
 gnttab_setup_table(
-    XEN_GUEST_HANDLE_PARAM(gnttab_setup_table_t) uop, unsigned int count)
+    XEN_GUEST_HANDLE_PARAM(gnttab_setup_table_t) uop, unsigned int count,
+    unsigned int limit_max)
 {
     struct vcpu *curr = current;
     struct gnttab_setup_table op;
@@ -1811,15 +1824,6 @@ gnttab_setup_table(
 
     if ( unlikely(copy_from_guest(&op, uop, 1)) )
         return -EFAULT;
-
-    if ( unlikely(op.nr_frames > max_grant_frames) )
-    {
-        gdprintk(XENLOG_INFO, "Xen only supports up to %d grant-table frames"
-                " per domain.\n",
-                max_grant_frames);
-        op.status = GNTST_general_error;
-        goto out;
-    }
 
     if ( !guest_handle_okay(op.frame_list, op.nr_frames) )
         return -EFAULT;
@@ -1840,6 +1844,21 @@ gnttab_setup_table(
     gt = d->grant_table;
     grant_write_lock(gt);
 
+    if ( unlikely(op.nr_frames > gt->max_grant_frames) )
+    {
+        gdprintk(XENLOG_INFO, "d%d is limited to %u grant-table frames\n",
+                d->domain_id, gt->max_grant_frames);
+        op.status = GNTST_general_error;
+        goto unlock;
+    }
+    if ( unlikely(limit_max < op.nr_frames) )
+    {
+        gdprintk(XENLOG_WARNING, "nr_frames for d%d is too large (%u,%u)\n",
+                 d->domain_id, op.nr_frames, limit_max);
+        op.status = GNTST_general_error;
+        goto unlock;
+    }
+
     if ( gt->gt_version == 0 )
         gt->gt_version = 1;
 
@@ -1849,8 +1868,9 @@ gnttab_setup_table(
          gnttab_grow_table(d, op.nr_frames) )
     {
         gdprintk(XENLOG_INFO,
-                 "Expand grant table to %u failed. Current: %u Max: %u\n",
-                 op.nr_frames, nr_grant_frames(gt), max_grant_frames);
+                 "Expand grant table of d%d to %u failed. Current: %u Max: %u\n",
+                 d->domain_id, op.nr_frames, nr_grant_frames(gt),
+                 gt->max_grant_frames);
         op.status = GNTST_general_error;
         goto unlock;
     }
@@ -1885,6 +1905,7 @@ gnttab_query_size(
 {
     struct gnttab_query_size op;
     struct domain *d;
+    struct grant_table *gt;
 
     if ( count != 1 )
         return -EINVAL;
@@ -1905,13 +1926,15 @@ gnttab_query_size(
         goto out;
     }
 
-    grant_read_lock(d->grant_table);
+    gt = d->grant_table;
 
-    op.nr_frames     = nr_grant_frames(d->grant_table);
-    op.max_nr_frames = max_grant_frames;
+    grant_read_lock(gt);
+
+    op.nr_frames     = nr_grant_frames(gt);
+    op.max_nr_frames = gt->max_grant_frames;
     op.status        = GNTST_okay;
 
-    grant_read_unlock(d->grant_table);
+    grant_read_unlock(gt);
 
  out:
     if ( d )
@@ -1955,10 +1978,10 @@ gnttab_prepare_for_transfer(
         if ( unlikely(scombo.shorts.flags != GTF_accept_transfer) ||
              unlikely(scombo.shorts.domid != ld->domain_id) )
         {
-            gdprintk(XENLOG_INFO, "Bad flags (%x) or dom (%d). "
-                    "(NB. expected dom %d)\n",
-                    scombo.shorts.flags, scombo.shorts.domid,
-                    ld->domain_id);
+            gdprintk(XENLOG_INFO,
+                     "Bad flags (%x) or dom (%d); expected d%d\n",
+                     scombo.shorts.flags, scombo.shorts.domid,
+                     ld->domain_id);
             goto fail;
         }
 
@@ -1972,7 +1995,7 @@ gnttab_prepare_for_transfer(
 
         if ( retries++ == 4 )
         {
-            gdprintk(XENLOG_WARNING, "Shared grant entry is unstable.\n");
+            gdprintk(XENLOG_WARNING, "Shared grant entry is unstable\n");
             goto fail;
         }
 
@@ -2011,7 +2034,7 @@ gnttab_transfer(
         /* Read from caller address space. */
         if ( unlikely(__copy_from_guest(&gop, uop, 1)) )
         {
-            gdprintk(XENLOG_INFO, "gnttab_transfer: error reading req %d/%d\n",
+            gdprintk(XENLOG_INFO, "error reading req %d/%u\n",
                     i, count);
             return -EFAULT;
         }
@@ -2032,8 +2055,7 @@ gnttab_transfer(
         if ( unlikely(!mfn_valid(_mfn(mfn))) )
         {
             put_gfn(d, gop.mfn);
-            gdprintk(XENLOG_INFO, "gnttab_transfer: out-of-range %lx\n",
-                    (unsigned long)gop.mfn);
+            gdprintk(XENLOG_INFO, "out-of-range %lx\n", (unsigned long)gop.mfn);
             gop.status = GNTST_bad_page;
             goto copyback;
         }
@@ -2050,8 +2072,7 @@ gnttab_transfer(
         gnttab_flush_tlb(d);
         if ( rc )
         {
-            gdprintk(XENLOG_INFO,
-                     "gnttab_transfer: can't remove GFN %"PRI_xen_pfn" (MFN %lx)\n",
+            gdprintk(XENLOG_INFO, "can't remove GFN %"PRI_xen_pfn" (MFN %lx)\n",
                      gop.mfn, mfn);
             gop.status = GNTST_general_error;
             goto put_gfn_and_copyback;
@@ -2060,8 +2081,7 @@ gnttab_transfer(
         /* Find the target domain. */
         if ( unlikely((e = rcu_lock_domain_by_id(gop.domid)) == NULL) )
         {
-            gdprintk(XENLOG_INFO, "gnttab_transfer: can't find domain %d\n",
-                    gop.domid);
+            gdprintk(XENLOG_INFO, "can't find d%d\n", gop.domid);
             gop.status = GNTST_bad_domain;
             goto put_gfn_and_copyback;
         }
@@ -2114,11 +2134,11 @@ gnttab_transfer(
             spin_unlock(&e->page_alloc_lock);
 
             if ( e->is_dying )
-                gdprintk(XENLOG_INFO, "gnttab_transfer: "
-                         "Transferee (d%d) is dying\n", e->domain_id);
+                gdprintk(XENLOG_INFO, "Transferee d%d is dying\n",
+                         e->domain_id);
             else
-                gdprintk(XENLOG_INFO, "gnttab_transfer: "
-                         "Transferee (d%d) has no headroom (tot %u, max %u)\n",
+                gdprintk(XENLOG_INFO,
+                         "Transferee d%d has no headroom (tot %u, max %u)\n",
                          e->domain_id, e->tot_pages, e->max_pages);
 
             gop.status = GNTST_general_error;
@@ -2146,8 +2166,8 @@ gnttab_transfer(
             spin_unlock(&e->page_alloc_lock);
 
             if ( okay /* i.e. e->is_dying due to the surrounding if() */ )
-                gdprintk(XENLOG_INFO, "gnttab_transfer: "
-                         "Transferee (d%d) is now dying\n", e->domain_id);
+                gdprintk(XENLOG_INFO, "Transferee d%d is now dying\n",
+                         e->domain_id);
 
             if ( drop_dom_ref )
                 put_domain(e);
@@ -2198,8 +2218,7 @@ gnttab_transfer(
     copyback:
         if ( unlikely(__copy_field_to_guest(uop, &gop, status)) )
         {
-            gdprintk(XENLOG_INFO, "gnttab_transfer: error writing resp "
-                     "%d/%d\n", i, count);
+            gdprintk(XENLOG_INFO, "error writing resp %d/%u\n", i, count);
             return -EFAULT;
         }
         guest_handle_add_offset(uop, 1);
@@ -2664,7 +2683,7 @@ static int gnttab_copy_claim_buf(const struct gnttab_copy *op,
                              buf->read_only, buf->domain);
         if ( rc != GNTST_okay )
             PIN_FAIL(out, rc,
-                     "source frame %"PRI_xen_pfn" invalid.\n", ptr->u.gmfn);
+                     "source frame %"PRI_xen_pfn" invalid\n", ptr->u.gmfn);
 
         buf->ptr.u.gmfn = ptr->u.gmfn;
         buf->ptr.offset = 0;
@@ -2676,7 +2695,8 @@ static int gnttab_copy_claim_buf(const struct gnttab_copy *op,
         if ( !get_page_type(buf->page, PGT_writable_page) )
         {
             if ( !buf->domain->is_dying )
-                gdprintk(XENLOG_WARNING, "Could not get writable frame %lx\n", buf->frame);
+                gdprintk(XENLOG_WARNING, "Could not get writable frame %lx\n",
+                         buf->frame);
             rc = GNTST_general_error;
             goto out;
         }
@@ -2709,7 +2729,7 @@ static int gnttab_copy_buf(const struct gnttab_copy *op,
 
     if ( ((op->source.offset + op->len) > PAGE_SIZE) ||
          ((op->dest.offset + op->len) > PAGE_SIZE) )
-        PIN_FAIL(out, GNTST_bad_copy_arg, "copy beyond page area.\n");
+        PIN_FAIL(out, GNTST_bad_copy_arg, "copy beyond page area\n");
 
     if ( op->source.offset < src->ptr.offset ||
          op->source.offset + op->len > src->ptr.offset + src->len )
@@ -2986,7 +3006,7 @@ gnttab_set_version(XEN_GUEST_HANDLE_PARAM(gnttab_set_version_t) uop)
 
 static long
 gnttab_get_status_frames(XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_t) uop,
-                         int count)
+                         unsigned int count, unsigned int limit_max)
 {
     gnttab_get_status_frames_t op;
     struct domain *d;
@@ -3001,7 +3021,7 @@ gnttab_get_status_frames(XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_t) uop,
     if ( unlikely(copy_from_guest(&op, uop, 1) != 0) )
     {
         gdprintk(XENLOG_INFO,
-                 "Fault while reading gnttab_get_status_frames_t.\n");
+                 "Fault while reading gnttab_get_status_frames_t\n");
         return -EFAULT;
     }
 
@@ -3026,9 +3046,19 @@ gnttab_get_status_frames(XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_t) uop,
 
     if ( unlikely(op.nr_frames > nr_status_frames(gt)) )
     {
-        gdprintk(XENLOG_INFO, "Guest requested addresses for %d grant status "
-                 "frames, but only %d are available.\n",
-                 op.nr_frames, nr_status_frames(gt));
+        gdprintk(XENLOG_INFO, "Requested addresses of d%d for %u grant "
+                 "status frames, but has only %u\n",
+                 d->domain_id, op.nr_frames, nr_status_frames(gt));
+        op.status = GNTST_general_error;
+        goto unlock;
+    }
+
+    if ( unlikely(limit_max < grant_to_status_frames(op.nr_frames)) )
+    {
+        gdprintk(XENLOG_WARNING,
+                 "grant_to_status_frames(%u) for d%d is too large (%u,%u)\n",
+                 op.nr_frames, d->domain_id,
+                 grant_to_status_frames(op.nr_frames), limit_max);
         op.status = GNTST_general_error;
         goto unlock;
     }
@@ -3341,7 +3371,7 @@ do_grant_table_op(
 
     case GNTTABOP_setup_table:
         rc = gnttab_setup_table(
-            guest_handle_cast(uop, gnttab_setup_table_t), count);
+            guest_handle_cast(uop, gnttab_setup_table_t), count, UINT_MAX);
         ASSERT(rc <= 0);
         break;
 
@@ -3390,7 +3420,8 @@ do_grant_table_op(
 
     case GNTTABOP_get_status_frames:
         rc = gnttab_get_status_frames(
-            guest_handle_cast(uop, gnttab_get_status_frames_t), count);
+            guest_handle_cast(uop, gnttab_get_status_frames_t), count,
+                              UINT_MAX);
         break;
 
     case GNTTABOP_get_version:
@@ -3466,11 +3497,12 @@ grant_table_create(
     spin_lock_init(&t->maptrack_lock);
 
     /* Okay, install the structure. */
+    t->domain = d;
     d->grant_table = t;
 
     if ( d->domain_id == 0 )
     {
-        ret = grant_table_init(d, t);
+        ret = grant_table_init(d, t, gnttab_dom0_frames(), max_maptrack_frames);
     }
 
     return ret;
@@ -3500,7 +3532,7 @@ gnttab_release_mappings(
 
         ref = map->ref;
 
-        gdprintk(XENLOG_INFO, "Grant release %#x ref %#x flags %#x dom %u\n",
+        gdprintk(XENLOG_INFO, "Grant release %#x ref %#x flags %#x d%d\n",
                  handle, ref, map->flags, map->domid);
 
         rd = rcu_lock_domain_by_id(map->domid);
@@ -3605,7 +3637,7 @@ void grant_table_warn_active_grants(struct domain *d)
 
         nr_active++;
         if ( nr_active <= WARN_GRANT_MAX )
-            printk(XENLOG_G_DEBUG "Dom%d has active grant %x ("
+            printk(XENLOG_G_DEBUG "d%d has active grant %x ("
 #ifndef NDEBUG
                    "GFN %lx, "
 #endif
@@ -3619,7 +3651,7 @@ void grant_table_warn_active_grants(struct domain *d)
     }
 
     if ( nr_active > WARN_GRANT_MAX )
-        printk(XENLOG_G_DEBUG "Dom%d has too many (%d) active grants to report\n",
+        printk(XENLOG_G_DEBUG "d%d has too many (%d) active grants to report\n",
                d->domain_id, nr_active);
 
     grant_read_unlock(gt);
@@ -3671,11 +3703,15 @@ int grant_table_set_limits(struct domain *d, unsigned int grant_frames,
 {
     struct grant_table *gt = d->grant_table;
 
+    if ( grant_frames < INITIAL_NR_GRANT_FRAMES ||
+         grant_frames > max_grant_frames ||
+         maptrack_frames > max_maptrack_frames )
+        return -EINVAL;
     if ( !gt )
         return -ENOENT;
 
     /* Set limits. */
-    return grant_table_init(d, gt);
+    return grant_table_init(d, gt, grant_frames, maptrack_frames);
 }
 
 #ifdef CONFIG_HAS_MEM_SHARING
@@ -3747,7 +3783,7 @@ int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
     }
     else
     {
-        if ( (idx >= nr_grant_frames(gt)) && (idx < max_grant_frames) )
+        if ( (idx >= nr_grant_frames(gt)) && (idx < gt->max_grant_frames) )
             gnttab_grow_table(d, idx + 1);
 
         if ( idx < nr_grant_frames(gt) )
@@ -3774,6 +3810,12 @@ static void gnttab_usage_print(struct domain *rd)
     printk("[ref] localdom mfn      pin          localdom gmfn     flags\n");
 
     grant_read_lock(gt);
+
+    printk("grant-table for remote d%d (v%u)\n"
+           "  %u frames (%u max), %u maptrack frames (%u max)\n",
+           rd->domain_id, gt->gt_version,
+           nr_grant_frames(gt), gt->max_grant_frames,
+           nr_maptrack_frames(gt), gt->max_maptrack_frames);
 
     for ( ref = 0; ref != nr_grant_entries(gt); ref++ )
     {
@@ -3802,12 +3844,7 @@ static void gnttab_usage_print(struct domain *rd)
             status = status_entry(gt, ref);
         }
 
-        if ( first )
-        {
-            printk("grant-table for remote domain:%5d (v%d)\n",
-                   rd->domain_id, gt->gt_version);
-            first = 0;
-        }
+        first = 0;
 
         /*      [0xXXX]  ddddd 0xXXXXXX 0xXXXXXXXX      ddddd 0xXXXXXX 0xXX */
         printk("[0x%03x]  %5d 0x%06lx 0x%08x      %5d 0x%06"PRIx64" 0x%02x\n",
@@ -3819,8 +3856,7 @@ static void gnttab_usage_print(struct domain *rd)
     grant_read_unlock(gt);
 
     if ( first )
-        printk("grant-table for remote domain:%5d ... "
-               "no active grant table entries\n", rd->domain_id);
+        printk("no active grant table entries\n");
 }
 
 static void gnttab_usage_print_all(unsigned char key)
@@ -3834,19 +3870,16 @@ static void gnttab_usage_print_all(unsigned char key)
 
 static int __init gnttab_usage_init(void)
 {
-    BUILD_BUG_ON(DEFAULT_MAX_MAPTRACK_FRAMES < DEFAULT_MAX_NR_GRANT_FRAMES);
-
-    if ( !max_grant_frames )
-        max_grant_frames = DEFAULT_MAX_NR_GRANT_FRAMES;
-
-    if ( !max_maptrack_frames )
-        max_maptrack_frames = DEFAULT_MAX_MAPTRACK_FRAMES;
-
     register_keyhandler('g', gnttab_usage_print_all,
                         "print grant table usage", 1);
     return 0;
 }
 __initcall(gnttab_usage_init);
+
+unsigned int __init gnttab_dom0_frames(void)
+{
+    return min(max_grant_frames, gnttab_dom0_max());
+}
 
 /*
  * Local variables:
